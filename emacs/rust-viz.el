@@ -217,8 +217,11 @@ Returns (STEPS . VISIT-COUNT), or nil if LINE hasn't run yet."
                                          'cursor t))))))))))
 
 ;;;###autoload
-(defun rust-viz-run ()
-  "Run the buffer's program and annotate each executed line inline."
+(defun rust-viz-run (&optional quiet)
+  "Run the buffer's program and annotate each executed line inline.
+Also opens the stack/heap window for the line at point.  With QUIET (as
+on save), only annotate: the window isn't opened, just refreshed if it's
+already showing."
   (interactive)
   (rust-viz-clear)
   (setq rust-viz--trace (rust-viz--run-process))
@@ -227,7 +230,7 @@ Returns (STEPS . VISIT-COUNT), or nil if LINE hasn't run yet."
         (message "rust-viz: %s" (or (alist-get 'error rust-viz--trace) "nothing ran"))
       (rust-viz--annotate (1- n))
       (add-hook 'post-command-hook #'rust-viz--follow nil t)
-      (rust-viz--follow t)
+      (rust-viz--follow (not quiet))
       (if-let* ((err (alist-get 'error rust-viz--trace)))
           (message "rust-viz: stopped — %s" err)
         (message "rust-viz: %d steps. Output: %s" n
@@ -393,7 +396,7 @@ size you've dragged it to sticks while stepping."
 (defun rust-viz--after-save ()
   (when (and rust-viz-annotate-on-save (not rust-viz-stepping-mode))
     (condition-case e
-        (rust-viz-run)
+        (rust-viz-run t)
       (error (message "rust-viz: %s" (error-message-string e))))))
 
 ;;;###autoload

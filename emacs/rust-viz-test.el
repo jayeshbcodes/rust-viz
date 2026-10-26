@@ -136,4 +136,28 @@
             (should (= h (window-total-height win)))))
       (rust-viz-quit))))
 
+(ert-deftest rust-viz-save-annotates-without-opening-window ()
+  (let ((file (make-temp-file "rust-viz-save" nil ".rs"
+                              "fn main() {\n    let s = String::from(\"hi\");\n}\n")))
+    (unwind-protect
+        (with-current-buffer (find-file-noselect file)
+          (switch-to-buffer (current-buffer))
+          (delete-other-windows)
+          (when (get-buffer "*rust-viz*") (kill-buffer "*rust-viz*"))
+          (rust-viz-mode 1)
+          (goto-char (point-max))
+          (insert "\n")
+          (save-buffer)
+          ;; Annotated...
+          (should (rust-viz-test--annotation 2))
+          ;; ...but no window popped up.
+          (should-not (get-buffer-window "*rust-viz*"))
+          ;; An explicit run still opens it.
+          (rust-viz-run)
+          (should (get-buffer-window "*rust-viz*"))
+          (rust-viz-mode -1)
+          (set-buffer-modified-p nil)
+          (kill-buffer))
+      (delete-file file))))
+
 ;;; rust-viz-test.el ends here
