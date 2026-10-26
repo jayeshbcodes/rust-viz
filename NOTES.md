@@ -46,6 +46,12 @@ Reference doesn't specify.
 | `Enum { .. }` (incl. `Option`) | Inline tag + payload; user enums `Copy` only via derive; `Option<T>` is `Copy` iff `T` is | Same | ✅ Correct |
 | `Box(HeapId)` | One heap allocation holding the value; moving the `Box` moves only the pointer | `HeapObject::Box`, `HeapAlloc` on `Box::new`, freed on drop | ✅ Correct |
 | `Vec`/`String` capacity | `Vec::new()`/`String::new()` don't allocate (cap 0). Growth = `max(2·cap, needed, MIN_NON_ZERO_CAP)`, min 4 for `Vec<T>` (elem ≤ 1024 bytes), 8 for `String`. `vec![..]`/`String::from`/`.clone()` allocate exactly `len`. `clear()` keeps capacity. **Verified against rustc's `.capacity()`** (`samples/capacity.rs` golden test) | `HeapObject::{Vec,Str}::cap` with exactly that rule; `HeapRealloc` event on growth | ✅ Correct |
+| `Closure { captures, modes, kind }` | A closure is an anonymous struct of its captures, stored inline. Each variable is captured by `&`, `&mut`, or by value — the least the body needs (a by-value use of a `Copy` value still only captures `&`, unless `move`). Mutating a capture ⇒ `FnMut`; moving a captured value out ⇒ `FnOnce`. A closure is `Copy` iff all captures are (verified: copying a closure that captures `&i32` compiles and both copies work) | Captures inferred syntactically from the body, then borrowed/moved at creation (real `Borrow`/`Move` events). Inside a call, captured names alias the real storage: the outer variable (by-ref) or the closure's own field (by-value, so `move` FnMut state persists between calls). Calling an `FnMut` needs `let mut`; calling an `FnOnce` moves it | ✅ Correct (2026-10-26). Gaps: Rust 2021 *disjoint field* capture (`p.x` only) isn't modeled — the whole variable is captured, and a field read counts as a borrow |
+| `Iter(Box<IterNode>)` | Iterators are lazy, inline structs (`Map<Iter<'_, T>, F>`); `.iter()` holds a borrow of the collection, `into_iter()` owns the Vec's buffer; adaptors do nothing until a consumer pulls | Same: a pipeline of nodes, driven one item at a time, so closure calls appear in true execution order. Dropping an iterator ends its borrow / frees its buffer | ✅ Correct |
+| `collect()` capacity | `TrustedLen` sources (`map` over `.iter()`, ranges) allocate exactly once; others start at `max(4, lower_bound+1)` then grow like `push`; `vec.into_iter()…collect()` with same-type items **reuses the source buffer in place**; `collect::<String>()` reserves `chars`' lower bound `(bytes+3)/4`. **All verified against rustc** (`samples/iter_capacity.rs`, plus a pointer-equality check for the in-place case) | Same rules. In-place reuse is decided by comparing the first output item's type name with the source element's — an approximation of std's size/align check | ✅ Correct (approximation noted) |
+| `sort_by_key` call count | std calls the key fn on *every comparison* (no caching); slices ≤ 20 use insertion sort — the Book's 3-rectangle example reports 6 calls | Same algorithm for ≤ 20 elements; larger slices compute each key once (call count diverges, order doesn't) | ✅ Correct for ≤ 20 |
+| `FnItem(String)` | A function used as a value is a zero-sized `Copy` value | Same | ✅ Correct |
+| `s.as_bytes()` | A `&[u8]` view of the string's own bytes: borrows the `String`, allocates nothing | `Ref` with a `Proj::Bytes` projection; indexing yields `u8`s; `s.bytes()` iterates them | ✅ Correct |
 
 ## Borrow checker model
 
@@ -84,9 +90,10 @@ Reference doesn't specify.
   a derived `Debug` (e.g. `Vec<Secret>`), the derived-style rendering is
   shown instead. `f.pad`, `f.debug_struct(..)` and `{:.2}`-style flags
   read by the impl (`f.precision()`) aren't modeled.
-- Closures and iterator adaptor chains (`.iter().map(..).collect()`) are
-  unsupported; `for` handles ranges, `&v`/`&mut v`/`v`, `.iter()`,
-  `.iter_mut()`, `.enumerate()`, `.rev()`, `.chars()` directly.
+- ~~Closures and iterator chains unsupported~~ — done 2026-10-26 (see the
+  ledger rows above). Not yet: `peekable`, `flat_map`/`flatten`, `windows`/
+  `chunks`, `HashMap` collection, `impl Iterator for MyType` (user
+  iterators); a closure isn't `Debug`/`Clone`-checked beyond its captures.
 - `format!`'s initial capacity isn't modeled exactly (we allocate `len`;
   real `format!` uses an estimate) — don't trust its `.capacity()`.
 - No per-binding type tracking: reassigning a variable to a value of a

@@ -94,6 +94,15 @@ pub fn state_label(b: &crate::memory::Binding) -> String {
         OwnershipState::BorrowedShared(n) => format!("  (borrowed ×{n})"),
         OwnershipState::BorrowedMut => "  (mutably borrowed)".into(),
     };
+    if b.alias {
+        let own_copy = matches!(&b.value, crate::value::Value::Ref(p, _) if p.path.last() == Some(&crate::value::Proj::Field(b.name.clone())));
+        s.push_str(if own_copy {
+            "  (captured by value — the closure's own copy, stored inside it)"
+        } else {
+            "  (captured — this is the outer variable, reached through the closure)"
+        });
+        return s;
+    }
     if b.expired {
         s.push_str("  (borrow ended — not used again)");
     }

@@ -71,7 +71,10 @@ impl Event {
             Event::HeapRealloc { id, old_cap, new_cap } => format!("realloc #{id} cap {old_cap}→{new_cap}"),
             Event::HeapFree { id } => format!("free #{id}"),
             Event::Drop { name } => format!("drop {name}"),
+            Event::FrameEnter { name } if name.starts_with("closure ") => format!("→ {name}"),
             Event::FrameEnter { name } => format!("→ {name}()"),
+            // A closure's return is implied by its call on the same line.
+            Event::FrameExit { name } if name.starts_with("closure ") => return None,
             Event::FrameExit { name } => format!("← {name} returns"),
             Event::Note(n) if n.starts_with('✗') => n.clone(),
             Event::Note(_) => return None,

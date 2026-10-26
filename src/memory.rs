@@ -1,6 +1,6 @@
 use std::fmt;
 
-use crate::value::{HeapId, Place, Proj, RefKind, Value};
+use crate::value::{Capture, HeapId, Place, Proj, RefKind, Value};
 
 /// Tracks what's currently allowed to happen to a binding — this *is* the
 /// borrow checker's rule set, just enforced at our own runtime instead of
@@ -65,11 +65,16 @@ pub struct Binding {
     /// move: those paths are unusable and won't be dropped again, but the
     /// rest of the value still is usable and still gets dropped.
     pub moved_paths: Vec<Vec<Proj>>,
+    /// Inside a closure call: this name stands for a captured variable —
+    /// `value` is a reference to the real storage (the outer variable, or
+    /// the closure's own field for a by-value capture), and using the name
+    /// goes straight through it.
+    pub alias: bool,
 }
 
 impl Binding {
     fn new(name: impl Into<String>, value: Value, mutable: bool) -> Self {
-        Binding { name: name.into(), value, mutable, state: OwnershipState::Owned, expired: false, deferred: false, moved_paths: Vec::new() }
+        Binding { name: name.into(), value, mutable, state: OwnershipState::Owned, expired: false, deferred: false, moved_paths: Vec::new(), alias: false }
     }
 
     pub fn mark_moved(&mut self) -> Result<(), MemoryError> {
@@ -364,6 +369,10 @@ pub enum Resolved<'a> {
     Val(&'a Value),
     Str(&'a str),
     Slice(&'a [Value]),
+    /// `s.as_bytes()` (or a sub-slice of it).
+    Bytes(&'a [u8]),
+    /// One byte of an `as_bytes()` view (`bytes[i]`).
+    Byte(u8),
 }
 
 /// Follows `place` through the stack (and into the heap for `Vec` elements
@@ -371,8 +380,27 @@ pub enum Resolved<'a> {
 pub fn resolve<'a>(stack: &'a Stack, heap: &'a Heap, place: &Place) -> Result<Resolved<'a>, MemoryError> {
     let b = stack.binding(place.frame, place.slot).ok_or_else(|| MemoryError::Dangling(place.name.clone()))?;
     let mut cur = &b.value;
-    for proj in &place.path {
+    for (k, proj) in place.path.iter().enumerate() {
         cur = match (proj, cur) {
+            (Proj::Bytes, v) => {
+                let bytes = match v {
+                    Value::StaticStr(s) => s.as_bytes(),
+                    Value::Str(id) => match heap.get(*id)? {
+                        HeapObject::Str { s, .. } => s.as_bytes(),
+                        _ => return Err(MemoryError::Dangling(place.describe())),
+                    },
+                    _ => return Err(MemoryError::Dangling(place.describe())),
+                };
+                return match &place.path[k + 1..] {
+                    [] => Ok(Resolved::Bytes(bytes)),
+                    [Proj::Index(i)] => bytes.get(*i).map(|b| Resolved::Byte(*b)).ok_or(MemoryError::IndexOutOfBounds { len: bytes.len(), index: *i }),
+                    [Proj::Range(a, b)] => bytes.get(*a..*b).map(Resolved::Bytes).ok_or(MemoryError::IndexOutOfBounds { len: bytes.len(), index: *b }),
+                    _ => Err(MemoryError::Dangling(place.describe())),
+                };
+            }
+            (Proj::Field(f), Value::Closure { captures: fields, .. }) => {
+                &fields.iter().find(|(n, _)| n == f).ok_or_else(|| MemoryError::Dangling(place.describe()))?.1
+            }
             (Proj::Field(f), Value::Struct { fields, .. } | Value::Enum { fields, .. }) => {
                 &fields.iter().find(|(n, _)| n == f).ok_or_else(|| MemoryError::Dangling(place.describe()))?.1
             }
@@ -452,7 +480,7 @@ pub fn resolve_mut<'a>(stack: &'a mut Stack, heap: &'a mut Heap, place: &Place) 
     };
     for proj in rest {
         cur = match (proj, cur) {
-            (Proj::Field(f), Value::Struct { fields, .. } | Value::Enum { fields, .. }) => {
+            (Proj::Field(f), Value::Struct { fields, .. } | Value::Enum { fields, .. } | Value::Closure { captures: fields, .. }) => {
                 &mut fields.iter_mut().find(|(n, _)| n == f).ok_or_else(dangling)?.1
             }
             (Proj::Field(f), Value::Tuple(items)) => items.get_mut(f.parse::<usize>().map_err(|_| dangling())?).ok_or_else(dangling)?,
@@ -490,7 +518,8 @@ pub fn display_value(stack: &Stack, heap: &Heap, v: &Value) -> String {
         Value::Ref(place, _) => match resolve(stack, heap, place) {
             Ok(Resolved::Val(target)) => display_value(stack, heap, target),
             Ok(Resolved::Str(s)) => s.to_string(),
-            Ok(Resolved::Slice(_)) | Err(_) => debug_value(stack, heap, v, false),
+            Ok(Resolved::Byte(b)) => b.to_string(),
+            Ok(Resolved::Slice(_) | Resolved::Bytes(_)) | Err(_) => debug_value(stack, heap, v, false),
         },
         // No `Display` in real Rust for these; the interpreter rejects
         // `{}` on them, so this is only reached from the TUI.
@@ -544,6 +573,12 @@ impl fmt::Debug for DebugView<'_> {
             Value::Char(c) => fmt::Debug::fmt(c, f),
             Value::Unit => f.write_str("()"),
             Value::Formatter(_) => f.write_str("Formatter"),
+            Value::Closure { .. } => f.write_str("<closure>"),
+            Value::FnItem(n) => f.write_str(n),
+            Value::Iter(n) => match &**n {
+                crate::value::IterNode::Range { front, back } => write!(f, "{front}..{back}"),
+                n => write!(f, "<{}>", n.describe()),
+            },
             Value::StaticStr(s) => fmt::Debug::fmt(s.as_str(), f),
             Value::Str(id) => match self.heap.get(*id) {
                 Ok(HeapObject::Str { s, .. }) => fmt::Debug::fmt(s.as_str(), f),
@@ -571,6 +606,8 @@ impl fmt::Debug for DebugView<'_> {
                 Ok(Resolved::Val(target)) => fmt::Debug::fmt(&self.with(target), f),
                 Ok(Resolved::Str(s)) => fmt::Debug::fmt(s, f),
                 Ok(Resolved::Slice(items)) => f.debug_list().entries(items.iter().map(|x| self.with(x))).finish(),
+                Ok(Resolved::Bytes(bytes)) => f.debug_list().entries(bytes.iter()).finish(),
+                Ok(Resolved::Byte(b)) => fmt::Debug::fmt(&b, f),
                 Err(_) => f.write_str("<dangling>"),
             },
         }
@@ -601,6 +638,23 @@ pub fn describe_value(stack: &Stack, heap: &Heap, v: &Value) -> String {
         Value::Box(id) => format!("Box → #{id} ({})", debug_value(stack, heap, v, false)),
         Value::StaticStr(s) => format!("&str {s:?}  (static: lives in the binary, not the heap)"),
         Value::Formatter(_) => "&mut Formatter (collects the text `write!` produces)".into(),
+        Value::FnItem(n) => format!("fn {n} (a function used as a value — zero bytes, nothing captured)"),
+        Value::Iter(n) => format!("{}  (iterator state, stored on the stack — lazy until driven)", n.describe()),
+        Value::Closure { captures, modes, kind, .. } => {
+            if captures.is_empty() {
+                return format!("{kind:?} closure, captures nothing");
+            }
+            let caps: Vec<String> = captures
+                .iter()
+                .zip(modes)
+                .map(|((n, v), m)| match m {
+                    Capture::ByRef => format!("{n} by & ({})", debug_value(stack, heap, v, false)),
+                    Capture::ByMut => format!("{n} by &mut ({})", debug_value(stack, heap, v, false)),
+                    Capture::ByValue => format!("{n} by value = {}", debug_value(stack, heap, v, false)),
+                })
+                .collect();
+            format!("{kind:?} closure capturing {}", caps.join(", "))
+        }
         Value::Ref(place, kind) => {
             let amp = if *kind == RefKind::Mutable { "&mut " } else { "&" };
             format!("{amp}{} → {}", place.describe(), debug_value(stack, heap, v, false))
@@ -635,8 +689,14 @@ pub fn owned_heap_ids(heap: &Heap, v: &Value, out: &mut Vec<HeapId>) {
                 owned_heap_ids(heap, x, out);
             }
         }
-        Value::Struct { fields, .. } | Value::Enum { fields, .. } => {
+        Value::Struct { fields, .. } | Value::Enum { fields, .. } | Value::Closure { captures: fields, .. } => {
             for (_, x) in fields {
+                owned_heap_ids(heap, x, out);
+            }
+        }
+        Value::Iter(n) => {
+            out.extend(n.buffers());
+            for x in n.held_values() {
                 owned_heap_ids(heap, x, out);
             }
         }

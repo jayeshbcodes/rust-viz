@@ -131,3 +131,18 @@ fn boxes_sample_matches_rustc() {
 fn display_sample_matches_rustc() {
     assert_matches_rustc("samples/display.rs", "display");
 }
+
+#[test]
+fn closures_sample_matches_rustc() {
+    assert_matches_rustc("samples/closures.rs", "closures");
+}
+
+#[test]
+fn iterators_sample_matches_rustc() {
+    assert_matches_rustc("samples/iterators.rs", "iterators");
+}
+
+#[test]
+fn iter_capacity_sample_matches_rustc() {
+    assert_matches_rustc("samples/iter_capacity.rs", "iter_capacity");
+}

@@ -132,6 +132,24 @@ the resulting values of any bindings it set."
         (short (append (alist-get 'short step) nil)))
     (string-join (append short changed) " · ")))
 
+(defun rust-viz--summarize (steps)
+  "One annotation for STEPS (a line's latest visit).
+Repeated events (an iterator calling its closure once per item) collapse
+to `label ×N'; each variable shows only its final value."
+  (let ((labels nil) (counts (make-hash-table :test 'equal)) (values nil))
+    (dolist (s steps)
+      (seq-doseq (l (alist-get 'short s))
+        (unless (gethash l counts) (push l labels))
+        (puthash l (1+ (gethash l counts 0)) counts))
+      (seq-doseq (c (alist-get 'changed s))
+        (setf (alist-get (alist-get 'name c) values nil nil #'equal) (alist-get 'value c))))
+    (string-join
+     (append (mapcar (lambda (l) (let ((n (gethash l counts)))
+                                   (if (> n 1) (format "%s ×%d" l n) l)))
+                     (nreverse labels))
+             (mapcar (lambda (v) (format "%s = %s" (car v) (cdr v))) (nreverse values)))
+     " · ")))
+
 (defun rust-viz--visit (line upto)
   "Steps making up the latest execution of LINE at or before step UPTO.
 A call on LINE runs the callee's lines in between; those are skipped by
@@ -180,7 +198,7 @@ Returns (STEPS . VISIT-COUNT), or nil if LINE hasn't run yet."
       (dolist (line lines)
         (when (> line 0)
           (let* ((visit (rust-viz--visit line upto))
-                 (text (string-join (seq-remove #'string-empty-p (mapcar #'rust-viz--label (car visit))) " · "))
+                 (text (rust-viz--summarize (car visit)))
                  (err (and err-line (= line err-line))))
             (when err
               (setq text (concat "✗ " (alist-get 'error rust-viz--trace))))

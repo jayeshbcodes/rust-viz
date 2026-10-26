@@ -100,6 +100,8 @@ fn flow_to_err(f: Flow) -> InterpError {
     }
 }
 
+mod iters;
+
 struct FnDef {
     /// `main`, `area`, `Rect::new` — shown as the frame name.
     name: String,
@@ -188,6 +190,9 @@ enum IterSrc {
     Owned { items: Vec<Value>, buffer: Option<HeapId> },
     /// `&v` / `&mut v` / `.iter()` — element references into `base`.
     Refs { base: PlaceRef, indices: Vec<usize>, kind: RefKind },
+    /// Any other iterator value (adaptor chains, ranges as values, …),
+    /// pulled one item at a time.
+    Lazy(Box<crate::value::IterNode>),
 }
 
 pub struct Interpreter {
@@ -231,6 +236,15 @@ pub struct Interpreter {
     /// One output buffer per user `fmt` call in progress (they nest: a
     /// `Display` impl can `{}`-format another `Display` type).
     fmt_bufs: Vec<String>,
+    /// Dropping a value whose borrows already ended early (NLL): free its
+    /// heap data but don't end those borrows a second time.
+    keep_refs: bool,
+    /// Closure definitions, indexed by `Value::Closure::id`.
+    closures: Vec<Rc<iters::ClosureDef>>,
+    /// Target type for the next `.collect()` (from `let v: Vec<_> = ...`).
+    collect_hint: Option<String>,
+    /// Source came in through `feed` (wrapped as `{chunk}`), not a file.
+    chunk_wrapped: bool,
 }
 
 impl Default for Interpreter {
@@ -265,6 +279,10 @@ impl Interpreter {
             self_tys: vec![None],
             temps: Vec::new(),
             fmt_bufs: Vec::new(),
+            keep_refs: false,
+            closures: Vec::new(),
+            collect_hint: None,
+            chunk_wrapped: false,
         }
     }
 
@@ -288,6 +306,7 @@ impl Interpreter {
         let block: Block = syn::parse_str(&format!("{{{source_chunk}\n}}"))
             .map_err(|e| InterpError::Parse(e.to_string()))?;
         self.source_lines.extend(source_chunk.lines().map(String::from));
+        self.chunk_wrapped = true;
         let depth = self.stack.frames.len();
         let result = self.exec_stmts(&block.stmts).and_then(|v| self.drop_value(&v));
         self.line_offset += source_chunk.lines().count();
@@ -308,6 +327,23 @@ impl Interpreter {
 
     fn line_of<T: Spanned>(&self, node: &T) -> usize {
         self.line_offset + node.span().start().line
+    }
+
+    /// The exact source text of a node, when it sits on one line.
+    fn source_text<T: Spanned>(&self, node: &T) -> Option<String> {
+        let (start, end) = (node.span().start(), node.span().end());
+        let line = self.source_lines.get(self.line_offset + start.line - 1)?;
+        // `feed` wraps a chunk as `{chunk`, shifting its first line by one.
+        let shift = usize::from(self.chunk_wrapped && start.line == 1);
+        let chars: Vec<char> = line.chars().collect();
+        let a = start.column.checked_sub(shift)?;
+        if start.line != end.line {
+            // Multi-line: its first line, then an ellipsis.
+            let first: String = chars.get(a..)?.iter().collect();
+            return Some(format!("{} … }}", first.trim_end()));
+        }
+        let b = end.column.checked_sub(shift)?;
+        Some(chars.get(a..b)?.iter().collect())
     }
 
     fn close_line(&self, block: &Block) -> usize {
@@ -591,18 +627,28 @@ impl Interpreter {
             }
             let (name, value, expired, moved_paths) = (b.name.clone(), b.value.clone(), b.expired, b.moved_paths.clone());
             let hidden = name == "<temp>";
+            if b.alias {
+                // A captured variable's stand-in: the real thing lives on.
+                self.stack.frames[idx].bindings[slot].state = OwnershipState::Moved;
+                continue;
+            }
             match &value {
-                Value::Ref(..) => {
+                Value::Ref(p, _) => {
                     if !expired {
                         self.drop_value(&value)?;
-                        if !hidden {
+                        // A reborrow (an iterator's `&v[i]`, …) held no
+                        // borrow of its own, so there's nothing to announce.
+                        if !hidden && !p.reborrow {
                             self.pending.push(Event::EndBorrow { name });
                         }
                     }
                 }
-                Value::Formatter(_) => {}
+                Value::Formatter(_) | Value::FnItem(_) => {}
                 _ => {
-                    self.drop_value_except(&value, &moved_paths, &mut Vec::new())?;
+                    let prev = std::mem::replace(&mut self.keep_refs, expired);
+                    let r = self.drop_value_except(&value, &moved_paths, &mut Vec::new());
+                    self.keep_refs = prev;
+                    r?;
                     if !hidden {
                         self.pending.push(Event::Drop { name });
                     }
@@ -676,8 +722,26 @@ impl Interpreter {
             return Ok(());
         }
         match v {
-            Value::Ref(place, kind) => self.release(place, *kind),
+            Value::Ref(place, kind)
+                if !self.keep_refs => {
+                    self.release(place, *kind);
+                }
             Value::Str(id) => self.free(*id),
+            Value::Closure { captures, .. } => {
+                for (n, x) in captures {
+                    path.push(Proj::Field(n.clone()));
+                    self.drop_value_except(x, moved, path)?;
+                    path.pop();
+                }
+            }
+            Value::Iter(node) => {
+                for x in node.held_values() {
+                    self.drop_value_except(x, &[], &mut Vec::new())?;
+                }
+                for id in node.buffers() {
+                    self.free(id);
+                }
+            }
             Value::Vec(id) => {
                 if let Ok(HeapObject::Vec { items, .. }) = self.heap.get(*id) {
                     for x in items.clone() {
@@ -743,7 +807,9 @@ impl Interpreter {
                 }
             }
             Value::Array(items) | Value::Tuple(items) => items.iter().for_each(|x| self.on_copy(x)),
-            Value::Struct { fields, .. } | Value::Enum { fields, .. } => fields.iter().for_each(|(_, x)| self.on_copy(x)),
+            Value::Struct { fields, .. } | Value::Enum { fields, .. } | Value::Closure { captures: fields, .. } => {
+                fields.iter().for_each(|(_, x)| self.on_copy(x))
+            }
             _ => {}
         }
     }
@@ -754,7 +820,7 @@ impl Interpreter {
         for attempt in 0..2 {
             let lookahead = self.lookahead;
             let b = self.stack.binding_mut(frame, slot).ok_or_else(|| MemoryError::Dangling("?".into()))?;
-            if b.expired && matches!(b.value, Value::Ref(..)) && !lookahead && a != Access::Write {
+            if b.expired && !b.alias && !lookahead && a != Access::Write {
                 return compile_err(format!(
                     "`{}` is used here, but the borrow it holds was already invalidated by a later conflicting use of what it points to (E0502/E0499)",
                     b.name
@@ -827,21 +893,24 @@ impl Interpreter {
         let mut found = Vec::new();
         for (fi, f) in self.stack.frames.iter().enumerate() {
             for (si, b) in f.bindings.iter().enumerate() {
-                if let Value::Ref(p, kind) = &b.value
-                    && p.frame == frame
-                    && p.slot == slot
-                    && !p.reborrow
-                    && !b.expired
-                    && b.state != OwnershipState::Moved
-                {
-                    found.push((fi, si, p.clone(), *kind, b.name.clone()));
+                if b.expired || b.alias || b.state == OwnershipState::Moved {
+                    continue;
+                }
+                let mut refs = Vec::new();
+                refs_in(&b.value, &mut refs);
+                if refs.iter().any(|(p, _)| p.frame == frame && p.slot == slot) {
+                    found.push((fi, si, refs, b.name.clone()));
                 }
             }
         }
-        for (fi, si, p, kind, name) in &found {
-            self.release(p, *kind);
+        // The holder (a reference, or a closure/iterator holding one) is
+        // assumed done: all of its borrows end.
+        for (fi, si, refs, name) in &found {
+            for (p, kind) in refs {
+                self.release(p, *kind);
+                self.pending.push(Event::BorrowExpired { name: name.clone(), target: p.describe() });
+            }
             self.stack.binding_mut(*fi, *si).unwrap().expired = true;
-            self.pending.push(Event::BorrowExpired { name: name.clone(), target: p.describe() });
         }
         !found.is_empty()
     }
@@ -865,17 +934,32 @@ impl Interpreter {
                     if b.expired || b.state != OwnershipState::Owned {
                         continue;
                     }
-                    let Value::Ref(place, kind) = &b.value else { continue };
+                    if b.alias {
+                        continue;
+                    }
+                    // A reference, or a value holding references (a closure
+                    // that captured by &/&mut, an iterator over a borrow…).
+                    let is_ref = matches!(b.value, Value::Ref(..));
+                    if !is_ref && b.name == "<temp>" {
+                        continue;
+                    }
+                    let mut refs = Vec::new();
+                    refs_in(&b.value, &mut refs);
+                    if refs.is_empty() && !is_ref {
+                        continue;
+                    }
                     let name = &b.name;
                     if self.live.iter().any(|c| c.inv == inv && c.frame >= k && c.idents.contains(name)) {
                         continue;
                     }
-                    let (place, kind, name) = (place.clone(), *kind, name.clone());
-                    self.release(&place, kind);
-                    self.stack.frames[k].bindings[slot].expired = true;
-                    if name != "<temp>" && !place.reborrow {
-                        self.pending.push(Event::BorrowExpired { name, target: place.describe() });
+                    let name = name.clone();
+                    for (place, kind) in &refs {
+                        self.release(place, *kind);
+                        if name != "<temp>" {
+                            self.pending.push(Event::BorrowExpired { name: name.clone(), target: place.describe() });
+                        }
                     }
+                    self.stack.frames[k].bindings[slot].expired = true;
                     changed = true;
                 }
             }
@@ -902,10 +986,16 @@ impl Interpreter {
         match expr {
             Expr::Path(p) => {
                 let Some(name) = path_ident(&p.path) else { return Ok(None) };
-                Ok(self.stack.lookup_slot(&name).map(|(frame, slot)| PlaceRef {
-                    place: Place { frame, slot, name, path: vec![], reborrow: false },
-                    via: None,
-                }))
+                let Some((frame, slot)) = self.stack.lookup_slot(&name) else { return Ok(None) };
+                // A captured variable inside a closure call: go straight to
+                // the real storage, governed by the capture's borrow kind.
+                if let Some(b) = self.stack.binding(frame, slot)
+                    && b.alias
+                    && let Value::Ref(target, kind) = &b.value
+                {
+                    return Ok(Some(PlaceRef { place: target.clone(), via: Some(*kind) }));
+                }
+                Ok(Some(PlaceRef { place: Place { frame, slot, name, path: vec![], reborrow: false }, via: None }))
             }
             Expr::Paren(p) => self.eval_place(&p.expr),
             Expr::Group(g) => self.eval_place(&g.expr),
@@ -1021,6 +1111,8 @@ impl Interpreter {
             Resolved::Val(v) => Got::Val(v.clone()),
             Resolved::Str(s) => Got::Str(s.to_string()),
             Resolved::Slice(items) => Got::Slice(items.to_vec()),
+            Resolved::Bytes(b) => Got::Slice(b.iter().map(|x| Value::Int(*x as i64)).collect()),
+            Resolved::Byte(b) => Got::Val(Value::Int(b as i64)),
         })
     }
 
@@ -1298,7 +1390,10 @@ impl Interpreter {
             let mutable = p.mutability.is_some();
             match &local.init {
                 Some(init) => {
-                    let value = self.eval_expr(&init.expr)?;
+                    self.collect_hint = strip_type(&local.pat).1.map(|t| t.to_token_stream().to_string());
+                    let value = self.eval_expr(&init.expr);
+                    self.collect_hint = None;
+                    let value = value?;
                     self.declare(name, value, mutable);
                 }
                 None => {
@@ -1470,8 +1565,8 @@ impl Interpreter {
                 let ty = c.ty.to_token_stream().to_string();
                 cast(v, &ty)
             }
-            Expr::Range(_) => Err(self.unsupported("ranges outside of `for` loops and slicing")),
-            Expr::Closure(_) => Err(self.unsupported("closures")),
+            Expr::Range(r) => self.eval_range(r),
+            Expr::Closure(c) => self.make_closure(c),
             Expr::Try(t) => {
                 // `x?`: unwrap `Ok`/`Some`, or return the `Err`/`None` early.
                 let v = self.eval_expr(&t.expr)?;
@@ -1528,9 +1623,16 @@ impl Interpreter {
                 {
                     return Ok(Value::Struct { ty: n.clone(), fields: vec![], copy: def.derives.copy });
                 }
+                if self.fns.contains_key(n) || matches!(n.as_str(), "Some" | "Ok" | "Err" | "drop") {
+                    return Ok(Value::FnItem(n.clone()));
+                }
                 Err(MemoryError::UnknownVariable(n.clone()).into())
             }
             [ty, c] => {
+                let full = format!("{ty}::{c}");
+                if self.fns.contains_key(&full) || matches!(full.as_str(), "String::from" | "Box::new") {
+                    return Ok(Value::FnItem(full));
+                }
                 if let Some(def) = self.enums.get(ty) {
                     return match def.variants.iter().find(|(v, ..)| v == c) {
                         Some((_, Shape::Unit, _)) => Ok(Value::Enum { ty: ty.clone(), variant: c.clone(), fields: vec![], copy: def.derives.copy }),
@@ -1753,14 +1855,18 @@ impl Interpreter {
         // real Rust running the old value's destructor at the point of
         // reassignment rather than waiting for the binding's scope to end.
         let skip_drop = whole && (was_moved || (expired && matches!(old, Value::Ref(..))));
+        let prev_keep = std::mem::replace(&mut self.keep_refs, whole && expired);
         if !skip_drop {
             let rel: Vec<Vec<Proj>> = moved_paths.iter().filter_map(|m| m.strip_prefix(p.place.path.as_slice()).map(<[Proj]>::to_vec)).collect();
             let had_heap = { let mut ids = Vec::new(); owned_heap_ids(&self.heap, &old, &mut ids); !ids.is_empty() };
-            self.drop_value_except(&old, &rel, &mut Vec::new())?;
+            let r = self.drop_value_except(&old, &rel, &mut Vec::new());
+            self.keep_refs = prev_keep;
+            r?;
             if had_heap {
                 self.pending.push(Event::Note(format!("the old value of `{}` is dropped right here, at the assignment", p.place.describe())));
             }
         }
+        self.keep_refs = prev_keep;
         if p.via.is_none() {
             let b = self.stack.binding_mut(p.place.frame, p.place.slot).unwrap();
             if whole {
@@ -1932,6 +2038,17 @@ impl Interpreter {
                 self.on_copy(v);
                 v.clone()
             }
+            Value::Closure { id, captures, modes, kind } => {
+                let mut out = Vec::new();
+                for (n, x) in captures {
+                    if matches!(x, Value::Ref(_, RefKind::Mutable)) {
+                        return compile_err("a closure that captured by `&mut` can't be cloned (E0599)");
+                    }
+                    out.push((n.clone(), self.deep_clone(x)?));
+                }
+                Value::Closure { id: *id, captures: out, modes: modes.clone(), kind: *kind }
+            }
+            Value::Iter(_) => return Err(self.unsupported("cloning an iterator")),
             other => other.clone(),
         })
     }
@@ -2199,6 +2316,7 @@ impl Interpreter {
 
     fn check_debug(&self, v: &Value) -> R<()> {
         match v {
+            Value::Closure { .. } => compile_err("closures don't implement `Debug` (E0277)"),
             Value::Struct { ty, fields, .. } | Value::Enum { ty, fields, .. } => {
                 let ok = match (self.structs.get(ty), self.enums.get(ty)) {
                     (Some(d), _) => d.derives.debug,
@@ -2232,15 +2350,33 @@ impl Interpreter {
 
     fn eval_call(&mut self, call: &syn::ExprCall) -> R<Value> {
         let line = self.line_of(call);
-        let Expr::Path(p) = &*call.func else {
-            return Err(self.unsupported("calling anything but a named function (closures, function pointers)"));
+        // Calling something held in a variable or field — a closure or a
+        // function value: `f(3)`, `(self.op)(x)`.
+        let via_value = match &*call.func {
+            Expr::Path(p) => path_ident(&p.path).is_some_and(|n| self.stack.lookup_slot(&n).is_some()),
+            _ => true,
         };
+        if via_value {
+            let callee = self.place_or_temp(&call.func)?;
+            let mut args = Vec::new();
+            for a in &call.args {
+                args.push(self.eval_arg(a)?);
+            }
+            return self.call_callable_place(callee, args, line);
+        }
+        let Expr::Path(p) = &*call.func else { unreachable!() };
         let segs = self.resolve_path_segments(&p.path);
-        let path = segs.join("::");
         let mut args = Vec::new();
         for a in &call.args {
             args.push(self.eval_arg(a)?);
         }
+        self.call_path(segs, args, line)
+    }
+
+    /// Calls a function by path — user-defined, a supported std function,
+    /// a tuple-struct/enum-variant constructor.
+    fn call_path(&mut self, segs: Vec<String>, args: Vec<Value>, line: usize) -> R<Value> {
+        let path = segs.join("::");
         match path.as_str() {
             "String::from" => {
                 let arg = args.first().cloned().unwrap_or(Value::Unit);
@@ -2410,13 +2546,6 @@ impl Interpreter {
     fn eval_method_call(&mut self, m: &syn::ExprMethodCall) -> R<Value> {
         let line = self.line_of(m);
         let method = m.method.to_string();
-        if matches!(
-            method.as_str(),
-            "iter" | "iter_mut" | "into_iter" | "map" | "filter" | "collect" | "sum" | "enumerate" | "rev" | "chars" | "bytes"
-                | "zip" | "fold" | "for_each" | "lines" | "split_whitespace" | "split" | "count" | "product" | "any" | "all"
-        ) {
-            return Err(self.unsupported(format!("iterator chains like `.{method}()` outside a `for` loop header (iterators/closures)")));
-        }
         let recv = self.place_or_temp(&m.receiver)?;
         let recv = self.auto_deref(recv)?;
         let got = self.got(&recv.place)?;
@@ -2435,6 +2564,12 @@ impl Interpreter {
                 _ => return compile_err(format!("`{ty}::{method}` is an associated function, not a method — call it as `{ty}::{method}(...)` (E0599)")),
             };
             return self.call_fn(def, Some(self_val), args, line);
+        }
+        // Iterators, closures-taking methods (`Option::map`, `Vec::retain`…),
+        // and iterator sources (`.iter()`, `.chars()`, `.as_bytes()`…).
+        let turbofish = m.turbofish.as_ref().map(|t| t.to_token_stream().to_string());
+        if let Some(v) = self.iter_method(&method, &recv, &got, &m.args, turbofish, line)? {
+            return Ok(v);
         }
         let mut args = Vec::new();
         for a in &m.args {
@@ -2682,6 +2817,29 @@ impl Interpreter {
                     _ => panic_err(format!("called `Result::unwrap()` on an `Err` value: {}", debug_value(&self.stack, &self.heap, &fields[0].1, false))),
                 }
             }
+            // ── chars
+            (Got::Val(Value::Char(c)), _) => {
+                let c = *c;
+                Ok(match method {
+                    "is_whitespace" => Value::Bool(c.is_whitespace()),
+                    "is_alphabetic" => Value::Bool(c.is_alphabetic()),
+                    "is_numeric" => Value::Bool(c.is_numeric()),
+                    "is_alphanumeric" => Value::Bool(c.is_alphanumeric()),
+                    "is_uppercase" => Value::Bool(c.is_uppercase()),
+                    "is_lowercase" => Value::Bool(c.is_lowercase()),
+                    "is_ascii_digit" => Value::Bool(c.is_ascii_digit()),
+                    "is_ascii_punctuation" => Value::Bool(c.is_ascii_punctuation()),
+                    "is_ascii" => Value::Bool(c.is_ascii()),
+                    "to_ascii_uppercase" => Value::Char(c.to_ascii_uppercase()),
+                    "to_ascii_lowercase" => Value::Char(c.to_ascii_lowercase()),
+                    "len_utf8" => Value::Int(c.len_utf8() as i64),
+                    "to_digit" => {
+                        let radix = self.arg_usize(&args, 0)? as u32;
+                        c.to_digit(radix).map(|d| Value::Int(d as i64)).map_or_else(option_none, option_some)
+                    }
+                    _ => return no_method("char"),
+                })
+            }
             // ── numbers
             (Got::Val(Value::Int(i)), _) => {
                 let i = *i;
@@ -2920,12 +3078,13 @@ impl Interpreter {
         let line = self.line_of(f);
         self.cur_line = line;
         let label = f.label.as_ref().map(|l| l.name.ident.to_string());
-        let (src, enumerate) = self.iter_source(&f.expr)?;
+        let (mut src, enumerate) = self.iter_source(&f.expr)?;
         let n = match &src {
-            IterSrc::Ints(v) => v.len(),
-            IterSrc::Chars(v) => v.len(),
-            IterSrc::Owned { items, .. } => items.len(),
-            IterSrc::Refs { indices, .. } => indices.len(),
+            IterSrc::Ints(v) => Some(v.len()),
+            IterSrc::Chars(v) => Some(v.len()),
+            IterSrc::Owned { items, .. } => Some(items.len()),
+            IterSrc::Refs { indices, .. } => Some(indices.len()),
+            IterSrc::Lazy(_) => None,
         };
         // The iterator itself holds the borrow for the whole loop — which is
         // why `v.push(..)` inside `for x in &v` is a borrow error.
@@ -2946,9 +3105,16 @@ impl Interpreter {
         let pat_text = f.pat.to_token_stream().to_string();
         let mut consumed = 0;
         let r = (|| -> R<Value> {
-            for i in 0..n {
+            for i in 0.. {
+                if n.is_some_and(|n| i >= n) {
+                    break;
+                }
                 self.check_step_budget()?;
-                let item = match &src {
+                let item = match &mut src {
+                    IterSrc::Lazy(node) => match self.iter_next(node, line)? {
+                        Some(x) => x,
+                        None => break,
+                    },
                     IterSrc::Ints(v) => Value::Int(v[i]),
                     IterSrc::Chars(v) => Value::Char(v[i]),
                     IterSrc::Owned { items, .. } => items[i].clone(),
@@ -2962,7 +3128,8 @@ impl Interpreter {
                 consumed = i + 1;
                 let item = if enumerate { Value::Tuple(vec![Value::Int(i as i64), item]) } else { item };
                 let shown = debug_value(&self.stack, &self.heap, &item, false);
-                self.pending.push(Event::Note(format!("for: iteration {} of {n} — `{pat_text}` = {shown}", i + 1)));
+                let of = n.map(|n| format!(" of {n}")).unwrap_or_default();
+                self.pending.push(Event::Note(format!("for: iteration {}{of} — `{pat_text}` = {shown}", i + 1)));
                 self.cur_line = line;
                 self.record_step(line);
                 self.push_scope("for body");
@@ -3008,6 +3175,9 @@ impl Interpreter {
                     self.free(*id);
                 }
             }
+            if let IterSrc::Lazy(node) = src {
+                self.drop_value(&Value::Iter(node))?;
+            }
             if !self.pending.is_empty() {
                 self.pending.insert(0, Event::Note("for loop finished".into()));
                 self.record_step(line);
@@ -3050,6 +3220,7 @@ impl Interpreter {
                                 indices.reverse();
                                 IterSrc::Refs { base, indices, kind }
                             }
+                            IterSrc::Lazy(node) => IterSrc::Lazy(Box::new(crate::value::IterNode::Rev(node))),
                         },
                         e,
                     ))
@@ -3072,7 +3243,10 @@ impl Interpreter {
                     };
                     Ok((IterSrc::Chars(t.chars().collect()), false))
                 }
-                other => Err(self.unsupported(format!("iterating over `.{other}()` (iterator adaptors/closures)"))),
+                _ => {
+                    let v = self.eval_expr(expr)?;
+                    self.iter_src_from_value(v)
+                }
             },
             Expr::Reference(r) => {
                 let base = self.place_or_temp(&r.expr)?;
@@ -3096,6 +3270,7 @@ impl Interpreter {
                         let base = self.auto_deref(PlaceRef { place: p, via: Some(kind) })?;
                         self.refs_source(base, kind)
                     }
+                    Value::Iter(node) => Ok((IterSrc::Lazy(node), false)),
                     v => compile_err(format!("`{}` is not an iterator (E0277)", v.type_name())),
                 }
             }
@@ -3427,6 +3602,20 @@ fn push_proj(place: &mut Place, proj: Proj) {
 
 fn describe_path(name: &str, path: &[Proj]) -> String {
     Place { frame: 0, slot: 0, name: name.to_string(), path: path.to_vec(), reborrow: false }.describe()
+}
+
+/// Every borrow-holding reference inside `v` (top-level, in fields, in a
+/// closure's captures, in an iterator's state).
+fn refs_in(v: &Value, out: &mut Vec<(Place, RefKind)>) {
+    match v {
+        Value::Ref(p, k) if !p.reborrow => out.push((p.clone(), *k)),
+        Value::Array(items) | Value::Tuple(items) => items.iter().for_each(|x| refs_in(x, out)),
+        Value::Struct { fields, .. } | Value::Enum { fields, .. } | Value::Closure { captures: fields, .. } => {
+            fields.iter().for_each(|(_, x)| refs_in(x, out))
+        }
+        Value::Iter(n) => n.held_values().into_iter().for_each(|x| refs_in(x, out)),
+        _ => {}
+    }
 }
 
 /// A reference inside `v` that points into frame `min_frame` or above.

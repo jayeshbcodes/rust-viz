@@ -139,3 +139,68 @@ fn main() { let p = P { name: String::from("a") }; println!("{p}"); println!("{}
     let self_b = in_fmt.stack.frames.iter().find(|f| f.name == "P::fmt").unwrap().get("self").unwrap();
     assert!(matches!(&self_b.value, rust_viz::value::Value::Ref(p, _) if p.name == "p"));
 }
+
+#[test]
+fn fnmut_closure_needs_mut_binding() {
+    let e = err_of("fn main() { let mut n = 0; let c = || n += 1; c(); }");
+    assert!(e.contains("E0596") && e.contains("let mut c"), "{e}");
+}
+
+#[test]
+fn using_a_variable_while_a_closure_still_holds_its_mut_borrow() {
+    // Rust Book ch. 13.1: printing between defining and calling the closure.
+    let e = err_of("fn main() { let mut list = vec![1]; let mut f = || list.push(7); println!(\"{list:?}\"); f(); }");
+    assert!(e.contains("mutably borrowed"), "{e}");
+}
+
+#[test]
+fn fnonce_closure_called_twice() {
+    let e = err_of("fn main() { let s = String::from(\"a\"); let f = move || s; f(); f(); }");
+    assert!(e.contains("E0382"), "{e}");
+}
+
+#[test]
+fn fnonce_closure_passed_to_map() {
+    let e = err_of("fn main() { let s = String::from(\"a\"); let v: Vec<String> = vec![1, 2].iter().map(move |_| s).collect(); }");
+    assert!(e.contains("E0525"), "{e}");
+}
+
+#[test]
+fn next_needs_mut_iterator() {
+    let e = err_of("fn main() { let v = vec![1]; let it = v.iter(); it.next(); }");
+    assert!(e.contains("immutable"), "{e}");
+}
+
+#[test]
+fn push_while_iterator_borrow_is_live() {
+    let e = err_of("fn main() { let mut v = vec![1, 2]; let it = v.iter(); v.push(3); println!(\"{:?}\", it.count()); }");
+    assert!(e.contains("borrowed"), "{e}");
+}
+
+#[test]
+fn closure_and_iterator_borrows_end_after_last_use() {
+    let src = "fn main() { let mut v = vec![1, 2]; let total: i32 = v.iter().map(|x| x * 2).sum(); let mut add = |x| v.push(x); add(total); v.push(9); println!(\"{v:?}\"); }";
+    let (interp, r) = Interpreter::run_program(src);
+    r.unwrap();
+    assert_eq!(interp.output, "[1, 2, 6, 9]\n");
+    assert_eq!(interp.steps.last().unwrap().heap.live_count(), 0);
+}
+
+#[test]
+fn as_bytes_borrows_the_string() {
+    let e = err_of("fn main() { let mut s = String::from(\"hi\"); let b = s.as_bytes(); s.push('!'); println!(\"{}\", b[0]); }");
+    assert!(e.contains("borrowed"), "{e}");
+}
+
+#[test]
+fn repl_closure_borrow_ends_lazily() {
+    let mut i = Interpreter::new();
+    i.feed("let mut list = vec![1];").unwrap();
+    i.feed("let mut f = || list.push(2);").unwrap();
+    i.feed("f();").unwrap();
+    // The closure's &mut borrow is assumed done once `list` is used...
+    i.feed("println!(\"{list:?}\");").unwrap();
+    assert_eq!(i.output, "[1, 2]\n");
+    // ...so calling it again afterwards is the compile error it would be.
+    assert!(i.feed("f();").is_err());
+}
