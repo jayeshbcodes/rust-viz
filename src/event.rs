@@ -57,6 +57,27 @@ impl Event {
         }
     }
 
+    /// A few-word label for inline editor annotations, or `None` when the
+    /// event is already conveyed by showing the binding's new value.
+    pub fn short(&self) -> Option<String> {
+        Some(match self {
+            Event::Declare { .. } | Event::Assign { .. } | Event::Mutate { .. } => return None,
+            Event::Move { from } => format!("moved {from}"),
+            Event::Borrow { name, mutable: true } => format!("&mut {name}"),
+            Event::Borrow { name, mutable: false } => format!("&{name}"),
+            Event::EndBorrow { name } => format!("{name}'s borrow ends"),
+            Event::BorrowExpired { name, .. } => format!("{name}'s borrow ends (last use)"),
+            Event::HeapAlloc { id, .. } => format!("alloc #{id}"),
+            Event::HeapRealloc { id, old_cap, new_cap } => format!("realloc #{id} cap {old_cap}→{new_cap}"),
+            Event::HeapFree { id } => format!("free #{id}"),
+            Event::Drop { name } => format!("drop {name}"),
+            Event::FrameEnter { name } => format!("→ {name}()"),
+            Event::FrameExit { name } => format!("← {name} returns"),
+            Event::Note(n) if n.starts_with('✗') => n.clone(),
+            Event::Note(_) => return None,
+        })
+    }
+
     /// Binding names this event is about — what the TUI highlights.
     pub fn names(&self) -> Vec<&str> {
         match self {

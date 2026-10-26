@@ -32,6 +32,7 @@ reveals: that `Vec::new()` hasn't allocated yet, that `s1 + &s2` reuses
 cargo run -- samples/borrowing.rs          # step through a program (n / p / q)
 cargo run -- --trace samples/borrowing.rs  # the same trace as plain text
 cargo run                                  # live REPL: type Rust, watch memory update
+cargo run -- --json samples/borrowing.rs   # machine-readable trace (for editors)
 ```
 
 The stepper shows the source with the current line highlighted, the stack
@@ -75,30 +76,40 @@ support X yet (line N)" message instead of guessing. Because the
 interpreter is dynamically typed, it doesn't type-check: all integers
 behave like `i64`.
 
-## Using it from Emacs
+## Emacs: inline annotations
 
-Install the binary once with `cargo install --path .`, then add this to
-your config:
+`emacs/rust-viz.el` shows what each line did to memory right in your
+buffer:
 
-```elisp
-(defun rust-viz-trace ()
-  "Show rust-viz's memory trace for the current buffer (no save needed)."
-  (interactive)
-  (shell-command-on-region (point-min) (point-max)
-                           "rust-viz --trace -" "*rust-viz*"))
-
-(defun rust-viz-step ()
-  "Step through the current file in the rust-viz TUI, inside Emacs."
-  (interactive)
-  (save-buffer)
-  (switch-to-buffer (make-term "rust-viz" "rust-viz" nil (buffer-file-name)))
-  (term-char-mode))
+```
+    let s1 = String::from("hello");     ⟵ alloc #0 · s1 = String "hello"  [ptr → #0, len 5, cap 5]
+    let len = calculate_length(&s1);    ⟵ &s1 · → calculate_length() · s = &s1 → "hello" · len = 5
+    let r1 = &s;                        ⟵ &s · r1 = &s → "hello, world"
+    println!("{r1} and {r2}");          ⟵ r1's borrow ends (last use) · r2's borrow ends (last use)
+    let r3 = &mut s;                    ⟵ &mut s · r3 = &mut s → "hello, world"
+    r3.push_str("!");                   ⟵ realloc #1 cap 12→24 · s = String "hello, world!"  [ptr → #1, len 13, cap 24]
+}                                       ⟵ free #1 · drop s · drop len · free #0 · drop s1 · ← main returns
 ```
 
-`M-x rust-viz-trace` opens the text trace in a side buffer. The trace
-says `line N:` at every step, so `M-g g` jumps you back to the source
-line. `M-x rust-viz-step` runs the interactive stepper in a terminal
-buffer (`n`/`p` to step, `q` to quit).
+Setup: install the binary (`cargo install --path .`), then
+
+```elisp
+(add-to-list 'load-path "/path/to/rust-viz/emacs")
+(require 'rust-viz)
+(add-hook 'rust-mode-hook #'rust-viz-mode)     ; or rust-ts-mode-hook
+```
+
+| Key | Command | What it does |
+|---|---|---|
+| `C-c C-v r` | `rust-viz-run` | Annotate every executed line with its latest effect (loop lines show `×N`). With `rust-viz-mode` on, this re-runs on every save. |
+| `C-c C-v s` | `rust-viz-step` | Step through execution: `n`/`SPC` next, `p`/`DEL` back, `g`/`G` first/last, `q` quit. The current line is highlighted, annotations replay up to that step, and a side window shows the full stack, heap, events and output so far. |
+| `C-c C-v c` | `rust-viz-clear` | Remove annotations. |
+
+The buffer's text is piped in, so unsaved edits and bare snippets (no
+`fn main`) work. If the program has an error, it's shown in red on the
+line where it stopped. The commands work without `rust-viz-mode` too.
+Any editor can build the same integration on `rust-viz --json <file|->`;
+the format is documented at the top of `src/json.rs`.
 
 ## Accuracy
 
@@ -116,6 +127,7 @@ tested two ways:
 
 ```sh
 cargo test
+emacs --batch -L emacs -l emacs/rust-viz-test.el -f ert-run-tests-batch-and-exit
 ```
 
 ## License

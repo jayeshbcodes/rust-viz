@@ -4,7 +4,8 @@ use rust_viz::{trace, tui};
 const USAGE: &str = "usage:
   rust-viz                 live REPL: type statements, watch memory update
   rust-viz <file.rs>       run a program, then step through it (n/p)
-  rust-viz --trace <file>  print the step-by-step trace as text (`-` = stdin)";
+  rust-viz --trace <file>  print the step-by-step trace as text (`-` = stdin)
+  rust-viz --json <file>   the trace as JSON, for editor integrations";
 
 fn main() {
     let args: Vec<String> = std::env::args().skip(1).collect();
@@ -17,6 +18,14 @@ fn main() {
                 eprintln!("{e}");
                 std::process::exit(1);
             }
+            Ok(())
+        }
+        // Always exits 0 with any program error inside the JSON, so an
+        // editor can still show the trace up to the error.
+        [flag, path] if flag == "--json" => {
+            let (interp, result) = Interpreter::run_program(&read(path));
+            let err = result.err().map(|e| e.to_string());
+            print!("{}", rust_viz::json::render(&interp.steps, &interp.output, err.as_deref()));
             Ok(())
         }
         [path] if !path.starts_with('-') => {
