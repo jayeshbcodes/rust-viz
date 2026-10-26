@@ -45,6 +45,10 @@ pub enum Value {
     /// the same "pointer + length into existing data" shape as a real fat
     /// pointer, with no allocation of its own.
     Ref(Place, RefKind),
+    /// The `f: &mut fmt::Formatter` handed to a user's `fmt` — index of
+    /// the output buffer `write!(f, ..)` appends to. Not real memory the
+    /// program owns; it's std's, so it never moves or drops.
+    Formatter(usize),
 }
 
 impl Value {
@@ -58,6 +62,7 @@ impl Value {
     pub fn is_copy(&self) -> bool {
         match self {
             Value::Int(_) | Value::Float(_) | Value::Bool(_) | Value::Char(_) | Value::Unit | Value::StaticStr(_) => true,
+            Value::Formatter(_) => true,
             Value::Ref(_, RefKind::Shared) => true,
             Value::Ref(_, RefKind::Mutable) => false,
             // `[T; N]`/tuples are `Copy` exactly when every element is.
@@ -84,6 +89,7 @@ impl Value {
             Value::StaticStr(_) => "&str".into(),
             Value::Ref(_, RefKind::Shared) => "&".into(),
             Value::Ref(_, RefKind::Mutable) => "&mut".into(),
+            Value::Formatter(_) => "&mut Formatter".into(),
         }
     }
 }
@@ -117,7 +123,7 @@ pub enum Proj {
 impl Place {
     /// `v[0]`, `rect.width`, `*b`, `s[0..5]` — for messages/the TUI.
     pub fn describe(&self) -> String {
-        let mut out = self.name.clone();
+        let mut out = if self.name == "<temp>" { "(temporary)".to_string() } else { self.name.clone() };
         for p in &self.path {
             match p {
                 Proj::Field(f) => out = format!("{out}.{f}"),

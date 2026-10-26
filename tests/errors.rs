@@ -115,3 +115,27 @@ fn repl_borrow_ends_lazily_and_later_use_is_an_error() {
     // ...but using `r` again proves the earlier borrow was still needed.
     assert!(i.feed("println!(\"{r}\");").is_err());
 }
+
+#[test]
+fn display_on_struct_without_impl_is_rejected() {
+    let e = err_of("struct P { x: i32 } fn main() { let p = P { x: 1 }; println!(\"{}\", p); }");
+    assert!(e.contains("Display"), "{e}");
+}
+
+#[test]
+fn display_impl_runs_as_a_real_call() {
+    let src = r#"
+use std::fmt;
+struct P { name: String }
+impl fmt::Display for P {
+    fn fmt(&self, f: &mut fmt::Formatter) -> fmt::Result { write!(f, "<{}>", self.name) }
+}
+fn main() { let p = P { name: String::from("a") }; println!("{p}"); println!("{}", p.name); }"#;
+    let (interp, r) = Interpreter::run_program(src);
+    r.unwrap();
+    assert_eq!(interp.output, "<a>\na\n");
+    // `fmt` got its own frame, with `self` borrowing the real `p`, not a copy.
+    let in_fmt = interp.steps.iter().find(|s| s.stack.frames.iter().any(|f| f.name == "P::fmt")).unwrap();
+    let self_b = in_fmt.stack.frames.iter().find(|f| f.name == "P::fmt").unwrap().get("self").unwrap();
+    assert!(matches!(&self_b.value, rust_viz::value::Value::Ref(p, _) if p.name == "p"));
+}

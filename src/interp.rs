@@ -228,6 +228,9 @@ pub struct Interpreter {
     /// Hidden bindings holding temporaries, dropped at the end of the
     /// statement that created them (unless borrowed — lifetime extension).
     temps: Vec<(usize, usize)>,
+    /// One output buffer per user `fmt` call in progress (they nest: a
+    /// `Display` impl can `{}`-format another `Display` type).
+    fmt_bufs: Vec<String>,
 }
 
 impl Default for Interpreter {
@@ -261,6 +264,7 @@ impl Interpreter {
             next_inv: 1,
             self_tys: vec![None],
             temps: Vec::new(),
+            fmt_bufs: Vec::new(),
         }
     }
 
@@ -447,11 +451,17 @@ impl Interpreter {
                     let tr = path.segments.last().map(|s| s.ident.to_string()).unwrap_or_default();
                     self.impls.entry(ty.clone()).or_default().push(tr);
                 }
+                let tr = imp.trait_.as_ref().and_then(|(p, _)| p.segments.last()).map(|s| s.ident.to_string());
                 for it in &imp.items {
                     if let syn::ImplItem::Fn(f) = it {
                         let name = format!("{ty}::{}", f.sig.ident);
-                        let def = FnDef { name: name.clone(), sig: f.sig.clone(), block: f.block.clone(), self_ty: Some(ty.clone()), line_base: self.line_offset };
-                        self.fns.insert(name, Rc::new(def));
+                        let def = Rc::new(FnDef { name: name.clone(), sig: f.sig.clone(), block: f.block.clone(), self_ty: Some(ty.clone()), line_base: self.line_offset });
+                        // `impl Display` and `impl Debug` both define `fmt`,
+                        // so trait methods are also keyed by trait.
+                        if let Some(tr) = &tr {
+                            self.fns.insert(format!("{ty}::{tr}::{}", f.sig.ident), def.clone());
+                        }
+                        self.fns.insert(name, def);
                     }
                 }
             }
@@ -590,6 +600,7 @@ impl Interpreter {
                         }
                     }
                 }
+                Value::Formatter(_) => {}
                 _ => {
                     self.drop_value_except(&value, &moved_paths, &mut Vec::new())?;
                     if !hidden {
@@ -1146,6 +1157,19 @@ impl Interpreter {
         Ok((self.eval_expr(expr)?, true))
     }
 
+    /// Like `eval_peek`, but a place comes back as a (count-free) reference
+    /// to it rather than a copy — `println!` really does take `&arg`, and a
+    /// user `fmt` then gets `self` pointing at the actual variable.
+    fn peek_ref(&mut self, expr: &Expr) -> R<(Value, bool)> {
+        if let Some(p) = self.eval_place(expr)? {
+            if p.via.is_none() {
+                self.access(p.place.frame, p.place.slot, &p.place.path, Access::Read)?;
+            }
+            return Ok((Value::Ref(Place { reborrow: true, ..p.place }, RefKind::Shared), false));
+        }
+        Ok((self.eval_expr(expr)?, true))
+    }
+
     /// A function argument. Passing a `&mut` binding reborrows it for the
     /// call instead of moving it, like real Rust's implicit reborrow.
     fn eval_arg(&mut self, expr: &Expr) -> R<Value> {
@@ -1448,7 +1472,21 @@ impl Interpreter {
             }
             Expr::Range(_) => Err(self.unsupported("ranges outside of `for` loops and slicing")),
             Expr::Closure(_) => Err(self.unsupported("closures")),
-            Expr::Try(_) => Err(self.unsupported("the `?` operator")),
+            Expr::Try(t) => {
+                // `x?`: unwrap `Ok`/`Some`, or return the `Err`/`None` early.
+                let v = self.eval_expr(&t.expr)?;
+                match v {
+                    Value::Enum { ty, variant, fields, .. } if ty == "Result" || ty == "Option" => match variant.as_str() {
+                        "Ok" | "Some" => Ok(fields.into_iter().next().map(|(_, x)| x).unwrap_or(Value::Unit)),
+                        _ => {
+                            let early = Value::Enum { ty, variant, fields, copy: false };
+                            self.pending.push(Event::Note("`?` hit an error → returning it early".into()));
+                            Err(Flow::Return(early))
+                        }
+                    },
+                    v => compile_err(format!("the `?` operator can only be applied to `Result`/`Option`, not `{}` (E0277)", v.type_name())),
+                }
+            }
             Expr::Let(_) => compile_err("`let` expressions are only allowed in `if let`/`while let`"),
             other => Err(self.unsupported(format!("this kind of expression ({})", expr_kind(other)))),
         }
@@ -1968,6 +2006,31 @@ impl Interpreter {
                 }
                 Ok(Value::Unit)
             }
+            "write" | "writeln" => {
+                let args: Vec<Expr> = parse_args()?.into_iter().collect();
+                let Some(dest) = args.first() else { return compile_err("`write!` needs a destination") };
+                let mut text = if args.len() > 1 { self.format_macro_args(&args[1..])? } else { String::new() };
+                if name == "writeln" {
+                    text.push('\n');
+                }
+                let (d, temp) = self.eval_peek(dest)?;
+                match self.deref_val(d.clone())? {
+                    Value::Formatter(i) => self.fmt_bufs[i].push_str(&text),
+                    Value::Str(id) => {
+                        // `write!` into a `String` (needs `use std::fmt::Write`).
+                        if let Some(p) = self.eval_place(dest)? {
+                            self.check_write(&p, false)?;
+                        }
+                        self.str_append(id, &text)?;
+                        self.pending.push(Event::Mutate { name: dest.to_token_stream().to_string() });
+                    }
+                    v => return compile_err(format!("cannot `write!` into a `{}` (E0599)", v.type_name())),
+                }
+                if temp {
+                    self.drop_value(&d)?;
+                }
+                Ok(result_ok())
+            }
             "unreachable" => panic_err("internal error: entered unreachable code"),
             "todo" => panic_err("not yet implemented"),
             other => Err(Flow::Err(InterpError::Unsupported { what: format!("the {other}! macro"), line })),
@@ -1998,13 +2061,13 @@ impl Interpreter {
                 && let Expr::Path(p) = &*a.left
                 && let Some(n) = path_ident(&p.path)
             {
-                let (v, t) = self.eval_peek(&a.right)?;
+                let (v, t) = self.peek_ref(&a.right)?;
                 if t {
                     temps.push(v.clone());
                 }
                 named.insert(n, v);
             } else {
-                let (v, t) = self.eval_peek(e)?;
+                let (v, t) = self.peek_ref(e)?;
                 if t {
                     temps.push(v.clone());
                 }
@@ -2027,7 +2090,7 @@ impl Interpreter {
                     } else {
                         let (f, s) = self.stack.lookup_slot(arg).ok_or_else(|| MemoryError::UnknownVariable(arg.clone()))?;
                         self.access(f, s, &[], Access::Read)?;
-                        Some(self.stack.binding(f, s).unwrap().value.clone())
+                        Some(Value::Ref(Place { frame: f, slot: s, name: arg.clone(), path: vec![], reborrow: true }, RefKind::Shared))
                     };
                     let v = v.ok_or_else(|| Flow::Err(InterpError::CompileError(format!("format string has more placeholders than arguments: `{fmt}`"))))?;
                     out.push_str(&self.render(&v, spec)?);
@@ -2041,6 +2104,13 @@ impl Interpreter {
     }
 
     fn render(&mut self, v: &Value, spec: &Spec) -> R<String> {
+        // A user `impl Display`/`impl Debug`: run their `fmt`. Width/fill
+        // are deliberately ignored, as in real Rust — std only pads when
+        // the impl itself calls `f.pad(..)`, which `write!` doesn't.
+        let trait_name = if spec.is_debug() { "Debug" } else { "Display" };
+        if let Some(text) = self.user_fmt(v, trait_name)? {
+            return Ok(text);
+        }
         if spec.is_debug() {
             self.check_debug(v)?;
             let s = debug_value(&self.stack, &self.heap, v, spec.alt);
@@ -2083,6 +2153,50 @@ impl Interpreter {
         Ok(pad(s, spec, numeric))
     }
 
+    /// Formats `v` with the program's own `impl <trait_name> for T`, if it
+    /// has one — a real call to `T::fmt`, with its own stack frame.
+    fn user_fmt(&mut self, v: &Value, trait_name: &str) -> R<Option<String>> {
+        let target = self.deref_val(v.clone())?;
+        let (Value::Struct { ty, .. } | Value::Enum { ty, .. }) = &target else { return Ok(None) };
+        let Some(def) = self.fns.get(&format!("{ty}::{trait_name}::fmt")).cloned() else { return Ok(None) };
+        self.pending.push(Event::Note(format!("formatting a `{ty}` calls your `impl {trait_name} for {ty}` → `{ty}::fmt`")));
+        // `self` is a reference to the value: to the real variable when the
+        // argument was one. A temporary (`println!("{}", Shape::Circle(3))`)
+        // gets a hidden slot that's never dropped here — the temporary's
+        // own drop happens at the end of the statement as usual.
+        let mut real = None;
+        let mut cur = v.clone();
+        while let Value::Ref(p, _) = &cur {
+            real = Some(p.clone());
+            cur = match self.got(p)? {
+                Got::Val(x) => x,
+                _ => break,
+            };
+        }
+        let (alias, place) = match real {
+            Some(p) => (None, p),
+            None => {
+                let a = self.temp_place(target.clone());
+                (Some(a.clone()), a.place)
+            }
+        };
+        let self_ref = Value::Ref(Place { reborrow: true, ..place }, RefKind::Shared);
+        self.fmt_bufs.push(String::new());
+        let fid = self.fmt_bufs.len() - 1;
+        let line = self.cur_line;
+        let r = self.call_fn(def, Some(self_ref), vec![Value::Formatter(fid)], line);
+        let text = self.fmt_bufs.pop().unwrap_or_default();
+        if let Some(a) = alias
+            && let Some(b) = self.stack.binding_mut(a.place.frame, a.place.slot)
+        {
+            b.state = OwnershipState::Moved;
+        }
+        match r? {
+            Value::Enum { variant, .. } if variant == "Err" => panic_err(format!("a {trait_name} implementation returned an error unexpectedly")),
+            _ => Ok(Some(text)),
+        }
+    }
+
     fn check_debug(&self, v: &Value) -> R<()> {
         match v {
             Value::Struct { ty, fields, .. } | Value::Enum { ty, fields, .. } => {
@@ -2090,7 +2204,7 @@ impl Interpreter {
                     (Some(d), _) => d.derives.debug,
                     (_, Some(d)) => d.derives.debug,
                     _ => true,
-                };
+                } || self.fns.contains_key(&format!("{ty}::Debug::fmt"));
                 if !ok {
                     return compile_err(format!("`{ty}` doesn't implement `Debug` — add #[derive(Debug)] above `{ty}` (E0277)"));
                 }
@@ -2386,6 +2500,23 @@ impl Interpreter {
                     _ => unreachable!(),
                 };
                 Ok(self.alloc_str(t))
+            }
+            (Got::Val(Value::Formatter(i)), "write_str") => {
+                let i = *i;
+                let text = match args.first() {
+                    Some(a) => self.text_of(a)?.unwrap_or_default(),
+                    None => String::new(),
+                };
+                self.fmt_bufs[i].push_str(&text);
+                Ok(result_ok())
+            }
+            (Got::Val(v @ (Value::Struct { .. } | Value::Enum { .. })), "to_string") => {
+                let ty = v.type_name();
+                let v = Value::Ref(Place { reborrow: true, ..recv.place.clone() }, RefKind::Shared);
+                match self.user_fmt(&v, "Display")? {
+                    Some(t) => Ok(self.alloc_str(t)),
+                    None => compile_err(format!("`{ty}` doesn't implement `Display`, so it has no `to_string` (E0599)")),
+                }
             }
             (Got::Val(v @ (Value::Int(_) | Value::Float(_) | Value::Bool(_) | Value::Char(_))), "to_string") => {
                 let t = display_value(&self.stack, &self.heap, v);
@@ -3306,6 +3437,10 @@ fn ref_into_frames(v: &Value, min_frame: usize) -> Option<&Place> {
         Value::Struct { fields, .. } | Value::Enum { fields, .. } => fields.iter().find_map(|(_, x)| ref_into_frames(x, min_frame)),
         _ => None,
     }
+}
+
+fn result_ok() -> Value {
+    Value::Enum { ty: "Result".into(), variant: "Ok".into(), fields: vec![("0".into(), Value::Unit)], copy: true }
 }
 
 fn option_none() -> Value {

@@ -73,8 +73,17 @@ Reference doesn't specify.
 
 - Integers are all `i64` at runtime: no `i32`/`u8` overflow panics, and no
   type checking of mismatched integer widths.
-- `impl Display for T` (`write!(f, ...)`) isn't supported yet, so `{}` on a
-  user type is rejected even when the program implements `Display`.
+- ~~`impl Display for T` isn't supported~~ — done 2026-10-25: `{}`/`{:?}`
+  on a type with a hand-written `impl Display`/`impl Debug` calls its
+  `fmt` as a real call (own frame, `self` borrowing the actual variable);
+  `write!`/`writeln!`/`f.write_str` append to the `Formatter`; `write!`
+  into a `String` works; `?` works on `Result`/`Option`. Width/fill on
+  such types are ignored, **verified against rustc** (`{:>12}` on a
+  `write!`-based impl prints unpadded — std only pads via `f.pad`). Known
+  gap: a manual `impl Debug` is only used at the top level — nested inside
+  a derived `Debug` (e.g. `Vec<Secret>`), the derived-style rendering is
+  shown instead. `f.pad`, `f.debug_struct(..)` and `{:.2}`-style flags
+  read by the impl (`f.precision()`) aren't modeled.
 - Closures and iterator adaptor chains (`.iter().map(..).collect()`) are
   unsupported; `for` handles ranges, `&v`/`&mut v`/`v`, `.iter()`,
   `.iter_mut()`, `.enumerate()`, `.rev()`, `.chars()` directly.

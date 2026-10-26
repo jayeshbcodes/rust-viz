@@ -126,3 +126,8 @@ fn capacity_sample_matches_rustc() {
 fn boxes_sample_matches_rustc() {
     assert_matches_rustc("samples/boxes.rs", "boxes");
 }
+
+#[test]
+fn display_sample_matches_rustc() {
+    assert_matches_rustc("samples/display.rs", "display");
+}

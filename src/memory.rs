@@ -543,6 +543,7 @@ impl fmt::Debug for DebugView<'_> {
             Value::Bool(b) => fmt::Debug::fmt(b, f),
             Value::Char(c) => fmt::Debug::fmt(c, f),
             Value::Unit => f.write_str("()"),
+            Value::Formatter(_) => f.write_str("Formatter"),
             Value::StaticStr(s) => fmt::Debug::fmt(s.as_str(), f),
             Value::Str(id) => match self.heap.get(*id) {
                 Ok(HeapObject::Str { s, .. }) => fmt::Debug::fmt(s.as_str(), f),
@@ -599,6 +600,7 @@ pub fn describe_value(stack: &Stack, heap: &Heap, v: &Value) -> String {
         },
         Value::Box(id) => format!("Box → #{id} ({})", debug_value(stack, heap, v, false)),
         Value::StaticStr(s) => format!("&str {s:?}  (static: lives in the binary, not the heap)"),
+        Value::Formatter(_) => "&mut Formatter (collects the text `write!` produces)".into(),
         Value::Ref(place, kind) => {
             let amp = if *kind == RefKind::Mutable { "&mut " } else { "&" };
             format!("{amp}{} → {}", place.describe(), debug_value(stack, heap, v, false))

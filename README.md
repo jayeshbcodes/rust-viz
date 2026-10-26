@@ -65,14 +65,40 @@ functions, structs/enums/`impl`/methods, trait default methods,
 `match`/`if let`/`while let`, `if`/`loop`/`while`/`for` (over ranges,
 `&v`, `&mut v`, `.iter()`, `.enumerate()`, `.rev()`, `.chars()`),
 `String`/`Vec`/arrays/tuples/slices/`Option`, `println!`/`format!` with
-format specs, and `assert!`s.
+format specs, hand-written `impl Display`/`impl Debug` with `write!`, the
+`?` operator, and `assert!`s.
 
 It does **not** support closures, iterator chains (`.map(..).collect()`),
-`HashMap`, `Rc`/`RefCell`, `impl Display`, `?`, modules, or external
+`HashMap`, `Rc`/`RefCell`, modules, or external
 crates yet. Anything unsupported stops with a clear "rust-viz doesn't
 support X yet (line N)" message instead of guessing. Because the
 interpreter is dynamically typed, it doesn't type-check: all integers
 behave like `i64`.
+
+## Using it from Emacs
+
+Install the binary once with `cargo install --path .`, then add this to
+your config:
+
+```elisp
+(defun rust-viz-trace ()
+  "Show rust-viz's memory trace for the current buffer (no save needed)."
+  (interactive)
+  (shell-command-on-region (point-min) (point-max)
+                           "rust-viz --trace -" "*rust-viz*"))
+
+(defun rust-viz-step ()
+  "Step through the current file in the rust-viz TUI, inside Emacs."
+  (interactive)
+  (save-buffer)
+  (switch-to-buffer (make-term "rust-viz" "rust-viz" nil (buffer-file-name)))
+  (term-char-mode))
+```
+
+`M-x rust-viz-trace` opens the text trace in a side buffer. The trace
+says `line N:` at every step, so `M-g g` jumps you back to the source
+line. `M-x rust-viz-step` runs the interactive stepper in a terminal
+buffer (`n`/`p` to step, `q` to quit).
 
 ## Accuracy
 
