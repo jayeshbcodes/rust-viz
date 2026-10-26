@@ -18,7 +18,9 @@
 ;;   takes_ownership(s);             ⟵ moved s · → takes_ownership()
 ;;
 ;; Commands:
-;;   `rust-viz-run'    annotate every executed line with its final effect.
+;;   `rust-viz-run'    annotate every executed line with its final effect,
+;;                     and show the stack/heap for the line at point in a
+;;                     side window (it follows the cursor).
 ;;   `rust-viz-step'   step through execution: n/p next/previous, g/G
 ;;                     first/last, q quit.  The current line is
 ;;                     highlighted, annotations replay up to that step, and
@@ -76,6 +78,9 @@ Error annotations are always shown in full."
 (defvar-local rust-viz--line-overlay nil)
 
 (defvar-local rust-viz--was-read-only nil)
+
+(defvar-local rust-viz--follow-line nil
+  "Line whose state the side window currently shows, after `rust-viz-run'.")
 
 (defconst rust-viz--detail-buffer "*rust-viz*")
 
@@ -150,7 +155,9 @@ Returns (STEPS . VISIT-COUNT), or nil if LINE hasn't run yet."
   "Remove rust-viz annotations from the buffer."
   (interactive)
   (remove-overlays (point-min) (point-max) 'rust-viz t)
-  (setq rust-viz--line-overlay nil))
+  (remove-hook 'post-command-hook #'rust-viz--follow t)
+  (setq rust-viz--line-overlay nil
+        rust-viz--follow-line nil))
 
 (defun rust-viz--annotate (upto)
   "Annotate each line with what its latest execution up to step UPTO did."
@@ -190,10 +197,39 @@ Returns (STEPS . VISIT-COUNT), or nil if LINE hasn't run yet."
     (if (= n 0)
         (message "rust-viz: %s" (or (alist-get 'error rust-viz--trace) "nothing ran"))
       (rust-viz--annotate (1- n))
+      (add-hook 'post-command-hook #'rust-viz--follow nil t)
+      (rust-viz--follow t)
       (if-let* ((err (alist-get 'error rust-viz--trace)))
           (message "rust-viz: stopped — %s" err)
         (message "rust-viz: %d steps. Output: %s" n
                  (truncate-string-to-width (string-trim (alist-get 'output rust-viz--trace)) 80 nil nil "…"))))))
+
+;;;; Following the cursor
+
+(defvar rust-viz-stepping-mode) ; defined below
+
+(defun rust-viz--last-step-on-line (line)
+  (cl-loop for i downfrom (1- (length (rust-viz--steps))) to 0
+           when (= (alist-get 'line (rust-viz--step i)) line) return i))
+
+(defun rust-viz--follow (&optional show)
+  "Update the side window to the state after the line at point last ran.
+With SHOW, also display the window (otherwise it's only refreshed if
+visible, so closing it isn't undone by moving the cursor)."
+  (when (and rust-viz--trace (not rust-viz-stepping-mode))
+    (let ((line (line-number-at-pos)))
+      (unless (and (eql line rust-viz--follow-line) (not show))
+        (setq rust-viz--follow-line line)
+        (let ((i (rust-viz--last-step-on-line line))
+              (n (length (rust-viz--steps))))
+          (rust-viz--fill-detail
+           (if i
+               (concat (format "State right after line %d last ran (step %d of %d).\n" line (1+ i) n)
+                       "Move the cursor to inspect another line · C-c C-v s to step through.\n\n"
+                       (rust-viz--detail-text (rust-viz--step i) i n))
+             (format "Line %d didn't run (or changed nothing).\nPut the cursor on an annotated line to see the stack and heap after it ran.\n" line)))
+          (when show
+            (rust-viz--display-detail)))))))
 
 ;;;; Stepping
 
@@ -244,27 +280,38 @@ Returns (STEPS . VISIT-COUNT), or nil if LINE hasn't run yet."
         (overlay-put rust-viz--line-overlay 'rust-viz t)
         (overlay-put rust-viz--line-overlay 'face 'rust-viz-current-line-face))
       (move-overlay rust-viz--line-overlay (line-beginning-position) (1+ (line-end-position))))
-    (rust-viz--show-detail step i n)
+    (rust-viz--fill-detail (rust-viz--detail-text step i n))
+    (rust-viz--display-detail)
     (message "rust-viz: step %d/%d%s   n/p step · g/G first/last · q quit" (1+ i) n
              (if (= line 0) " (end of program)" ""))))
 
-(defun rust-viz--show-detail (step i n)
+(defun rust-viz--detail-text (step i n)
+  "Full stack/heap/events text for STEP (index I of N), plus output so far."
   (let ((output (substring (alist-get 'output rust-viz--trace) 0
                            (min (alist-get 'output_len step)
                                 (length (alist-get 'output rust-viz--trace)))))
         (err (and (= i (1- n)) (alist-get 'error rust-viz--trace))))
-    (with-current-buffer (get-buffer-create rust-viz--detail-buffer)
-      (let ((inhibit-read-only t))
-        (erase-buffer)
-        (insert (alist-get 'detail step))
-        (when err
-          (insert "\n" (propertize (concat "✗ " err) 'face 'rust-viz-error-face) "\n"))
-        (insert "\n── program output so far ──\n" output)
-        (goto-char (point-min))
-        (special-mode)))
-    (display-buffer rust-viz--detail-buffer
-                    '((display-buffer-reuse-window display-buffer-in-side-window)
-                      (side . right) (window-width . 0.45)))))
+    (concat (alist-get 'detail step)
+            (if err (concat "\n" (propertize (concat "✗ " err) 'face 'rust-viz-error-face) "\n") "")
+            "\n program output so far\n"
+            (if (string-empty-p output) "   (none yet)\n" output))))
+
+(defun rust-viz--fill-detail (text)
+  (with-current-buffer (get-buffer-create rust-viz--detail-buffer)
+    (let ((inhibit-read-only t))
+      (erase-buffer)
+      (insert text)
+      (goto-char (point-min))
+      ;; Make the section headings stand out.
+      (while (re-search-forward "^ \\(what happened\\|stack\\|heap\\|program output so far\\)$" nil t)
+        (put-text-property (match-beginning 1) (match-end 1) 'face 'bold))
+      (goto-char (point-min))
+      (unless (derived-mode-p 'special-mode) (special-mode)))))
+
+(defun rust-viz--display-detail ()
+  (display-buffer rust-viz--detail-buffer
+                  '((display-buffer-reuse-window display-buffer-in-side-window)
+                    (side . right) (window-width . 0.45))))
 
 (defun rust-viz-next ()
   "Go to the next step."

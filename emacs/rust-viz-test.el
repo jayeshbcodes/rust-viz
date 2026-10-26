@@ -71,10 +71,10 @@
           (rust-viz-next)
           (should (= (line-number-at-pos) 3))
           (should (rust-viz-test--annotation 3))
-          (should (string-match-p "heap #0: String buffer"
+          (should (string-match-p " stack\n   fn main\n     s = String.*\n heap\n   #0: String buffer \"hello\".*← owned by s"
                                   (with-current-buffer "*rust-viz*" (buffer-string))))
           (rust-viz-last)
-          (should (string-match-p "program output so far ──\nhello"
+          (should (string-match-p "program output so far\nhello"
                                   (with-current-buffer "*rust-viz*" (buffer-string))))
           (rust-viz-previous)
           (should (= rust-viz--index (- (length (rust-viz--steps)) 2))))
@@ -88,5 +88,26 @@
     (insert "let mut v = Vec::new();\nv.push(1);\n")
     (rust-viz-run)
     (should (string-match-p "alloc #0" (rust-viz-test--annotation 2)))))
+
+(ert-deftest rust-viz-run-side-window-follows-cursor ()
+  (rust-viz-test--with-sample "ownership.rs"
+    (rust-viz-run)
+    (let ((detail (lambda () (with-current-buffer "*rust-viz*" (buffer-string)))))
+      ;; After `let s = String::from("hello");` the heap holds s's buffer.
+      (goto-char (point-min)) (forward-line 2)
+      (rust-viz--follow)
+      (should (string-match-p "right after line 3" (funcall detail)))
+      (should (string-match-p "#0: String buffer \"hello\".*← owned by s" (funcall detail)))
+      ;; After `takes_ownership(s);` s is moved and its buffer freed.
+      (forward-line 1)
+      (rust-viz--follow)
+      (should (string-match-p "s = <moved out>" (funcall detail)))
+      (should (string-match-p "#0: freed" (funcall detail)))
+      ;; A comment line didn't run.
+      (goto-char (point-min))
+      (rust-viz--follow)
+      (should (string-match-p "didn't run" (funcall detail))))
+    (rust-viz-clear)
+    (should-not (memq #'rust-viz--follow post-command-hook))))
 
 ;;; rust-viz-test.el ends here

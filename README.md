@@ -101,7 +101,7 @@ Setup: install the binary (`cargo install --path .`), then
 
 | Key | Command | What it does |
 |---|---|---|
-| `C-c C-v r` | `rust-viz-run` | Annotate every executed line with its latest effect (loop lines show `×N`). With `rust-viz-mode` on, this re-runs on every save. |
+| `C-c C-v r` | `rust-viz-run` | Annotate every executed line with its latest effect (loop lines show `×N`), and open a side window with the stack and heap right after the line at point ran — it follows the cursor. With `rust-viz-mode` on, this re-runs on every save. |
 | `C-c C-v s` | `rust-viz-step` | Step through execution: `n`/`SPC` next, `p`/`DEL` back, `g`/`G` first/last, `q` quit. The current line is highlighted, annotations replay up to that step, and a side window shows the full stack, heap, events and output so far. |
 | `C-c C-v c` | `rust-viz-clear` | Remove annotations. |
 

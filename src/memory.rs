@@ -605,8 +605,8 @@ pub fn describe_value(stack: &Stack, heap: &Heap, v: &Value) -> String {
             let amp = if *kind == RefKind::Mutable { "&mut " } else { "&" };
             format!("{amp}{} → {}", place.describe(), debug_value(stack, heap, v, false))
         }
-        Value::Array(items) => format!("{}  (inline, {} elements)", debug_value(stack, heap, v, false), items.len()),
-        Value::Struct { .. } | Value::Enum { .. } | Value::Tuple(_) => format!("{}  (inline)", debug_value(stack, heap, v, false)),
+        Value::Array(items) => format!("{}  (all {} elements stored right here on the stack)", debug_value(stack, heap, v, false), items.len()),
+        Value::Struct { .. } | Value::Enum { .. } | Value::Tuple(_) => format!("{}  (fields stored right here on the stack)", debug_value(stack, heap, v, false)),
         _ => debug_value(stack, heap, v, false),
     }
 }
