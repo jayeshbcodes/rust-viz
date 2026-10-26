@@ -11,7 +11,8 @@
 //! interleaved, one item at a time, exactly in real execution order.
 
 use super::*;
-use crate::value::{Capture, ClosureKind, IterNode};
+use crate::memory::map_order;
+use crate::value::{Capture, ClosureKind, IterNode, MapPart};
 
 pub(super) struct ClosureDef {
     params: Vec<Pat>,
@@ -514,7 +515,7 @@ impl Interpreter {
     /// (an iterator adaptor, an `Option::map` argument). `need` is the
     /// least the caller requires: `map` calls repeatedly, so an `FnOnce`
     /// closure is a compile error there.
-    fn call_value(&mut self, f: &mut Value, args: Vec<Value>, line: usize, need: ClosureKind) -> R<Value> {
+    pub(super) fn call_value(&mut self, f: &mut Value, args: Vec<Value>, line: usize, need: ClosureKind) -> R<Value> {
         match f {
             Value::FnItem(p) => {
                 let p = p.clone();
@@ -583,7 +584,7 @@ impl Interpreter {
     }
 
     /// Anything a `for`/`zip`/`chain` accepts (`IntoIterator`) → a node.
-    fn node_from(&mut self, v: Value) -> R<IterNode> {
+    pub(super) fn node_from(&mut self, v: Value) -> R<IterNode> {
         Ok(match v {
             Value::Iter(n) => *n,
             Value::Vec(id) => {
@@ -597,6 +598,19 @@ impl Interpreter {
             Value::Array(items) => {
                 let n = items.len();
                 IterNode::Owned { items, front: 0, back: n, buffer: None, borrow: None }
+            }
+            Value::Map(id) => {
+                let entries = self.map_entries(id)?;
+                let order = map_order(&self.stack, &self.heap, &entries);
+                self.pending.push(Event::Note("into_iter() takes ownership of the HashMap's table — entries are moved out as (key, value) pairs".into()));
+                let items = order.into_iter().map(|i| Value::Tuple(vec![entries[i].0.clone(), entries[i].1.clone()])).collect();
+                IterNode::MapInto { items, front: 0, buffer: id }
+            }
+            Value::Ref(p, kind) if matches!(self.got(&p)?, Got::Val(Value::Map(_))) => {
+                let Got::Val(Value::Map(id)) = self.got(&p)? else { unreachable!() };
+                let entries = self.map_entries(id)?;
+                let order = map_order(&self.stack, &self.heap, &entries);
+                IterNode::MapIter { base: Place { reborrow: true, ..p.clone() }, borrow: Box::new(Value::Ref(p, kind)), order, front: 0, kind, part: MapPart::Both }
             }
             Value::Ref(p, kind) => {
                 let len = self.len_of(&p)?;
@@ -776,6 +790,27 @@ impl Interpreter {
                 None => None,
             },
             IterNode::Rev(inner) => self.iter_next_back(inner, line)?,
+            IterNode::MapIter { base, order, front, kind, part, .. } => {
+                let Some(&i) = order.get(*front) else { return Ok(None) };
+                *front += 1;
+                let r = |proj: Proj, k: RefKind| {
+                    let mut p = base.clone();
+                    p.path.push(proj);
+                    Value::Ref(p, k)
+                };
+                Some(match part {
+                    MapPart::Keys => r(Proj::MapKey(i), RefKind::Shared),
+                    MapPart::Values => r(Proj::MapVal(i), *kind),
+                    MapPart::Both => Value::Tuple(vec![r(Proj::MapKey(i), RefKind::Shared), r(Proj::MapVal(i), *kind)]),
+                })
+            }
+            IterNode::MapInto { items, front, .. } => {
+                let x = items.get(*front).cloned();
+                if x.is_some() {
+                    *front += 1;
+                }
+                x
+            }
         })
     }
 
@@ -866,6 +901,9 @@ impl Interpreter {
                 None => self.iter_next_back(a, line)?,
             },
             IterNode::Rev(inner) => self.iter_next(inner, line)?,
+            IterNode::MapIter { .. } | IterNode::MapInto { .. } => {
+                return compile_err("a HashMap's iterator can't be reversed — it has no order to reverse (not a DoubleEndedIterator) (E0277)");
+            }
             _ => {
                 // Not double-ended in a way we model directly: run it
                 // forward to the end, then hand items out from the back.
@@ -1218,9 +1256,14 @@ impl Interpreter {
         let out = match method {
             "collect" => {
                 let hint = turbofish.or_else(|| self.collect_hint.clone()).unwrap_or_default();
-                if hint.contains("String") && !hint.contains("Vec") {
+                if hint.trim_start_matches(":: ").starts_with("HashMap") || hint.trim_start_matches(":: <").starts_with("HashMap") {
+                    let m = self.map_new(0);
+                    let Value::Map(id) = m else { unreachable!() };
+                    self.map_extend(id, &mut node, line)?;
+                    m
+                } else if hint.contains("String") && !hint.contains("Vec") {
                     self.collect_string(&mut node, line)?
-                } else if hint.contains("HashMap") || hint.contains("HashSet") || hint.contains("Result") || hint.contains("Option") {
+                } else if hint.contains("HashSet") || hint.contains("Result") || hint.contains("Option") {
                     return Err(self.unsupported(format!("collecting into `{hint}`")));
                 } else {
                     self.collect_vec(&mut node, line)?
@@ -1525,7 +1568,7 @@ fn split_ranges(t: &str, pat: &str) -> Vec<(usize, usize)> {
 }
 
 /// `Iterator::size_hint`, per std's implementations.
-fn size_hint(n: &IterNode) -> (usize, Option<usize>) {
+pub(super) fn size_hint(n: &IterNode) -> (usize, Option<usize>) {
     let sat = |x: i64| x.max(0) as usize;
     match n {
         IterNode::Range { front, back } => {
@@ -1537,6 +1580,8 @@ fn size_hint(n: &IterNode) -> (usize, Option<usize>) {
             (bytes.div_ceil(4), Some(bytes))
         }
         IterNode::Strs { front, back, .. } => (0, Some(back - front)),
+        IterNode::MapIter { order, front, .. } => (order.len() - front, Some(order.len() - front)),
+        IterNode::MapInto { items, front, .. } => (items.len() - front, Some(items.len() - front)),
         IterNode::Map(i, _) | IterNode::Enumerate(i, _) | IterNode::Cloned(i) | IterNode::Copied(i) | IterNode::Rev(i) => size_hint(i),
         IterNode::Filter(i, _) | IterNode::FilterMap(i, _) => (0, size_hint(i).1),
         IterNode::TakeWhile(i, _, done) => (0, if *done { Some(0) } else { size_hint(i).1 }),

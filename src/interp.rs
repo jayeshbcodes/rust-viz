@@ -101,6 +101,7 @@ fn flow_to_err(f: Flow) -> InterpError {
 }
 
 mod iters;
+mod maps;
 
 struct FnDef {
     /// `main`, `area`, `Rect::new` — shown as the frame name.
@@ -750,6 +751,14 @@ impl Interpreter {
                 }
                 self.free(*id);
             }
+            Value::Map(id) => {
+                // Entries first (keys and values), then the table itself.
+                for (k, x) in self.map_entries(*id)? {
+                    self.drop_value(&k)?;
+                    self.drop_value(&x)?;
+                }
+                self.free(*id);
+            }
             Value::Box(id) => {
                 if let Ok(HeapObject::Box(inner)) = self.heap.get(*id) {
                     let inner = inner.clone();
@@ -1017,6 +1026,21 @@ impl Interpreter {
             Expr::Index(ix) => {
                 let base = self.place_or_temp(&ix.expr)?;
                 let mut base = self.auto_deref(base)?;
+                // `map[&key]`: the `Index` impl for HashMap — a lookup that
+                // panics when the key is missing.
+                if let Got::Val(Value::Map(id)) = self.got(&base.place)? {
+                    if base.via.is_none() {
+                        self.access(base.place.frame, base.place.slot, &base.place.path, Access::Read)?;
+                    }
+                    let (key, temp) = self.eval_peek(&ix.index)?;
+                    let found = self.map_find(id, &key)?;
+                    if temp {
+                        self.drop_value(&key)?;
+                    }
+                    let Some(i) = found else { return panic_err("key not found in HashMap (`map[&key]` panics when the key is missing — use `.get()`)") };
+                    base.place.path.push(Proj::MapVal(i));
+                    return Ok(Some(base));
+                }
                 let len = self.len_of(&base.place)?;
                 let proj = match &*ix.index {
                     Expr::Range(r) => {
@@ -1128,6 +1152,10 @@ impl Interpreter {
             },
             Got::Val(Value::Str(id)) => match self.heap.get(id)? {
                 HeapObject::Str { s, .. } => s.len(),
+                _ => 0,
+            },
+            Got::Val(Value::Map(id)) => match self.heap.get(id)? {
+                HeapObject::Map { entries, .. } => entries.len(),
                 _ => 0,
             },
             Got::Val(v) => return compile_err(format!("cannot index into a value of type `{}` (E0608)", v.type_name())),
@@ -1822,6 +1850,28 @@ impl Interpreter {
             (Value::Bool(a), Value::Bool(b)) => Some(a.cmp(b)),
             (Value::Char(a), Value::Char(b)) => Some(a.cmp(b)),
             (Value::Unit, Value::Unit) => Some(std::cmp::Ordering::Equal),
+            // Tuples/arrays/Vecs compare element by element (lexicographic),
+            // so `("b", 10) > ("b", 9)`.
+            (Value::Tuple(_) | Value::Array(_) | Value::Vec(_), Value::Tuple(_) | Value::Array(_) | Value::Vec(_)) => {
+                let items = |v: &Value| -> R<Vec<Value>> {
+                    Ok(match v {
+                        Value::Tuple(x) | Value::Array(x) => x.clone(),
+                        Value::Vec(id) => match self.heap.get(*id)? {
+                            HeapObject::Vec { items, .. } => items.clone(),
+                            _ => vec![],
+                        },
+                        _ => vec![],
+                    })
+                };
+                let (a, b) = (items(l)?, items(r)?);
+                for (x, y) in a.iter().zip(&b) {
+                    match self.compare(&self.deref_val(x.clone())?, &self.deref_val(y.clone())?)? {
+                        Some(std::cmp::Ordering::Equal) => {}
+                        o => return Ok(o),
+                    }
+                }
+                Some(a.len().cmp(&b.len()))
+            }
             (Value::Struct { ty: a, .. }, Value::Struct { ty: b, .. }) | (Value::Enum { ty: a, .. }, Value::Enum { ty: b, .. }) if a != b => None,
             // Structural equality for compound values. Their derived
             // `Debug` text is a faithful structural fingerprint.
@@ -1948,7 +1998,7 @@ impl Interpreter {
         let (cap, min) = match self.heap.get_mut(id)? {
             HeapObject::Vec { cap, .. } => (cap, 4),
             HeapObject::Str { cap, .. } => (cap, 8),
-            HeapObject::Box(_) => return Ok(()),
+            HeapObject::Box(_) | HeapObject::Map { .. } => return Ok(()),
         };
         if needed <= *cap {
             return Ok(());
@@ -1998,6 +2048,22 @@ impl Interpreter {
                 }
                 let n = cloned.len();
                 self.alloc_vec(cloned, n)
+            }
+            Value::Map(id) => {
+                // A clone gets a same-sized table (same bucket count).
+                let (entries, buckets) = match self.heap.get(*id)? {
+                    HeapObject::Map { entries, buckets } => (entries.clone(), *buckets),
+                    _ => (vec![], 0),
+                };
+                let mut cloned = Vec::new();
+                for (k, x) in &entries {
+                    cloned.push((self.deep_clone(k)?, self.deep_clone(x)?));
+                }
+                let id = self.heap.alloc(HeapObject::Map { entries: cloned, buckets });
+                if buckets > 0 {
+                    self.pending.push(Event::HeapAlloc { id, what: format!("hash table (cloned), {buckets} buckets") });
+                }
+                Value::Map(id)
             }
             Value::Box(id) => {
                 let inner = match self.heap.get(*id)? {
@@ -2337,6 +2403,10 @@ impl Interpreter {
                 HeapObject::Box(x) => self.check_debug(x),
                 _ => Ok(()),
             },
+            Value::Map(id) => match self.heap.get(*id)? {
+                HeapObject::Map { entries, .. } => entries.iter().try_for_each(|(k, x)| self.check_debug(k).and_then(|_| self.check_debug(x))),
+                _ => Ok(()),
+            },
             Value::Ref(p, _) => match self.got(p)? {
                 Got::Val(x) => self.check_debug(&x),
                 Got::Slice(items) => items.iter().try_for_each(|x| self.check_debug(x)),
@@ -2407,6 +2477,23 @@ impl Interpreter {
                     self.pending.push(Event::HeapAlloc { id, what: format!("String buffer, {n} bytes (empty)") });
                 }
                 return Ok(Value::Str(id));
+            }
+            "HashMap::new" => {
+                self.pending.push(Event::Note("HashMap::new() doesn't allocate yet — capacity 0, no heap table".into()));
+                return Ok(self.map_new(0));
+            }
+            "HashMap::with_capacity" => {
+                let n = self.arg_usize(&args, 0)?;
+                return Ok(self.map_new(n));
+            }
+            "HashMap::from" => {
+                let v = args.into_iter().next().unwrap_or(Value::Unit);
+                let mut node = self.node_from(v)?;
+                let m = self.map_new(0);
+                let Value::Map(id) = m else { unreachable!() };
+                self.map_extend(id, &mut node, line)?;
+                self.drop_value(&Value::Iter(Box::new(node)))?;
+                return Ok(m);
             }
             "Box::new" => {
                 let v = args.into_iter().next().unwrap_or(Value::Unit);
@@ -2568,6 +2655,9 @@ impl Interpreter {
         // Iterators, closures-taking methods (`Option::map`, `Vec::retain`…),
         // and iterator sources (`.iter()`, `.chars()`, `.as_bytes()`…).
         let turbofish = m.turbofish.as_ref().map(|t| t.to_token_stream().to_string());
+        if let Some(v) = self.map_method(&method, &recv, &got, &m.args, line)? {
+            return Ok(v);
+        }
         if let Some(v) = self.iter_method(&method, &recv, &got, &m.args, turbofish, line)? {
             return Ok(v);
         }
@@ -2797,6 +2887,18 @@ impl Interpreter {
                     "is_ok" => variant == "Ok",
                     _ => variant == "Err",
                 }))
+            }
+            (Got::Val(Value::Enum { ty, .. }), "copied" | "cloned") if ty == "Option" => {
+                let Value::Enum { fields, .. } = self.read_place(&recv)? else { unreachable!() };
+                Ok(match fields.into_iter().next() {
+                    Some((_, x)) => {
+                        let t = self.deref_val(x.clone())?;
+                        let t = if method == "cloned" { self.deep_clone(&t)? } else { t };
+                        self.drop_value(&x)?;
+                        option_some(t)
+                    }
+                    None => option_none(),
+                })
             }
             (Got::Val(Value::Enum { ty, .. }), "unwrap" | "expect" | "unwrap_or") if ty == "Option" || ty == "Result" => {
                 let v = self.read_place(&recv)?;
@@ -3278,6 +3380,10 @@ impl Interpreter {
     }
 
     fn refs_source(&mut self, base: PlaceRef, kind: RefKind) -> R<(IterSrc, bool)> {
+        if let Got::Val(Value::Map(_)) = self.got(&base.place)? {
+            let node = self.map_iter(base, kind == RefKind::Mutable, crate::value::MapPart::Both)?;
+            return Ok((IterSrc::Lazy(Box::new(node)), false));
+        }
         let len = self.len_of(&base.place)?;
         if matches!(self.got(&base.place)?, Got::Str(_) | Got::Val(Value::Str(_) | Value::StaticStr(_))) {
             return compile_err("`&str`/`String` is not an iterator — use `.chars()` (E0277)");

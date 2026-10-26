@@ -60,7 +60,7 @@ and the program's output.
 ## Scope: what it can run
 
 rust-viz runs a **deliberately limited subset of Rust**, roughly chapters
-3–6 and 13 of [the Rust Book](https://doc.rust-lang.org/book/) plus `Box`:
+3–6, 8 and 13 of [the Rust Book](https://doc.rust-lang.org/book/) plus `Box`:
 
 functions, structs/enums/`impl`/methods, trait default methods,
 `match`/`if let`/`while let`, `if`/`loop`/`while`/`for` (over ranges,
@@ -70,9 +70,11 @@ format specs, hand-written `impl Display`/`impl Debug` with `write!`, the
 `?` operator, `assert!`s, closures (capture by `&`/`&mut`/`move`, `Fn`/`FnMut`/
 `FnOnce`), and lazy iterator chains (`iter`/`into_iter`/`chars`/
 `split_whitespace` → `map`/`filter`/`zip`/`enumerate`/`take`/`skip`/`rev`/… →
-`collect`/`sum`/`fold`/`find`/`any`/…).
+`collect`/`sum`/`fold`/`find`/`any`/…), and `HashMap` (`insert`/`get`/
+`entry().or_insert()`/`remove`/iteration/`map[&k]`, with its real table
+growth).
 
-It does **not** support `HashMap`, `Rc`/`RefCell`, user-defined
+It does **not** support `HashSet`/`BTreeMap`, `Rc`/`RefCell`, user-defined
 iterators (`impl Iterator`), modules, or external
 crates yet. Anything unsupported stops with a clear "rust-viz doesn't
 support X yet (line N)" message instead of guessing. Because the

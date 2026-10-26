@@ -204,3 +204,37 @@ fn repl_closure_borrow_ends_lazily() {
     // ...so calling it again afterwards is the compile error it would be.
     assert!(i.feed("f();").is_err());
 }
+
+#[test]
+fn hashmap_insert_moves_string_keys_and_values() {
+    // Rust Book ch. 8.3: field_name is invalid after the insert.
+    let e = err_of("use std::collections::HashMap; fn main() { let k = String::from(\"a\"); let mut m = HashMap::new(); m.insert(k, 1); println!(\"{k}\"); }");
+    assert!(e.contains("E0382"), "{e}");
+}
+
+#[test]
+fn hashmap_get_reference_blocks_insert() {
+    let e = err_of("use std::collections::HashMap; fn main() { let mut m = HashMap::new(); m.insert(1, 1); let v = m.get(&1); m.insert(2, 2); println!(\"{v:?}\"); }");
+    assert!(e.contains("borrowed"), "{e}");
+}
+
+#[test]
+fn hashmap_index_missing_key_panics() {
+    let (_, r) = Interpreter::run_program("use std::collections::HashMap; fn main() { let m: HashMap<i32, i32> = HashMap::new(); let x = m[&1]; }");
+    assert!(matches!(r, Err(InterpError::Panic(m)) if m.contains("key not found")));
+}
+
+#[test]
+fn hashmap_iterator_cannot_be_reversed() {
+    let e = err_of("use std::collections::HashMap; fn main() { let m = HashMap::from([(1, 2)]); for x in m.iter().rev() {} }");
+    assert!(e.contains("DoubleEndedIterator"), "{e}");
+}
+
+#[test]
+fn hashmap_entry_borrow_ends_after_last_use_and_heap_is_freed() {
+    let src = "use std::collections::HashMap; fn main() { let mut m = HashMap::new(); for w in \"a b a\".split_whitespace() { let c = m.entry(String::from(w)).or_insert(0); *c += 1; } m.insert(String::from(\"z\"), 9); println!(\"{} {}\", m[\"a\"], m.len()); }";
+    let (interp, r) = Interpreter::run_program(src);
+    r.unwrap();
+    assert_eq!(interp.output, "2 3\n");
+    assert_eq!(interp.steps.last().unwrap().heap.live_count(), 0);
+}

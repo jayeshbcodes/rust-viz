@@ -35,6 +35,10 @@ pub enum Value {
     Str(HeapId),
     /// `Box<T>` — a single value moved onto the heap.
     Box(HeapId),
+    /// `HashMap<K, V>` — like `Vec`, a small header on the stack (48 bytes:
+    /// the table pointer, bucket mask, item/growth counts, and the hasher's
+    /// random keys) pointing at a heap hash table holding the entries.
+    Map(HeapId),
     /// A string literal (`&'static str`) — its bytes live in the binary's
     /// read-only data, not the heap, so unlike `Str` this carries its
     /// content directly and needs no `Drop`/heap bookkeeping at all.
@@ -108,6 +112,18 @@ pub enum IterNode {
     Cloned(Box<IterNode>),
     Copied(Box<IterNode>),
     Rev(Box<IterNode>),
+    /// `map.iter()`/`keys()`/`values()`/`values_mut()`/`&map`: references
+    /// into the table, in its (unspecified) iteration `order`.
+    MapIter { base: Place, borrow: Box<Value>, order: Vec<usize>, front: usize, kind: RefKind, part: MapPart },
+    /// `map.into_iter()`: owns the table; yields `(K, V)` tuples.
+    MapInto { items: Vec<Value>, front: usize, buffer: HeapId },
+}
+
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub enum MapPart {
+    Both,
+    Keys,
+    Values,
 }
 
 impl IterNode {
@@ -140,6 +156,15 @@ impl IterNode {
             IterNode::Cloned(i) => format!("Cloned<{}>", inner(i)),
             IterNode::Copied(i) => format!("Copied<{}>", inner(i)),
             IterNode::Rev(i) => format!("Rev<{}>", inner(i)),
+            IterNode::MapIter { base, order, front, part, .. } => {
+                let what = match part {
+                    MapPart::Both => "Iter",
+                    MapPart::Keys => "Keys",
+                    MapPart::Values => "Values",
+                };
+                format!("map {what} over {} [{} left]", base.describe(), order.len() - front)
+            }
+            IterNode::MapInto { items, front, buffer } => format!("map IntoIter owning #{buffer} [{} left]", items.len() - front),
         }
     }
 
@@ -155,6 +180,8 @@ impl IterNode {
                 v
             }
             IterNode::Chars { borrow, .. } | IterNode::Strs { borrow, .. } => borrow.as_deref().into_iter().collect(),
+            IterNode::MapIter { borrow, .. } => vec![borrow],
+            IterNode::MapInto { items, front, .. } => items[*front..].iter().collect(),
             IterNode::Map(i, f) | IterNode::Filter(i, f) | IterNode::FilterMap(i, f) | IterNode::TakeWhile(i, f, _) | IterNode::SkipWhile(i, f, _) => {
                 let mut v = i.held_values();
                 v.push(f);
@@ -172,7 +199,7 @@ impl IterNode {
     /// The heap buffer an `IntoIter` source owns, if any.
     pub fn buffers(&self) -> Vec<HeapId> {
         match self {
-            IterNode::Owned { buffer: Some(id), .. } => vec![*id],
+            IterNode::Owned { buffer: Some(id), .. } | IterNode::MapInto { buffer: id, .. } => vec![*id],
             IterNode::Map(i, _) | IterNode::Filter(i, _) | IterNode::FilterMap(i, _) | IterNode::TakeWhile(i, ..) | IterNode::SkipWhile(i, ..)
             | IterNode::Enumerate(i, _) | IterNode::Take(i, _) | IterNode::Skip(i, _) | IterNode::StepBy(i, ..) | IterNode::Cloned(i)
             | IterNode::Copied(i) | IterNode::Rev(i) => i.buffers(),
@@ -207,7 +234,7 @@ impl Value {
             // `[T; N]`/tuples are `Copy` exactly when every element is.
             Value::Array(items) | Value::Tuple(items) => items.iter().all(Value::is_copy),
             Value::Struct { copy, .. } | Value::Enum { copy, .. } => *copy,
-            Value::Vec(_) | Value::Str(_) | Value::Box(_) => false,
+            Value::Vec(_) | Value::Str(_) | Value::Box(_) | Value::Map(_) => false,
         }
     }
 
@@ -225,6 +252,7 @@ impl Value {
             Value::Vec(_) => "Vec".into(),
             Value::Str(_) => "String".into(),
             Value::Box(_) => "Box".into(),
+            Value::Map(_) => "HashMap".into(),
             Value::StaticStr(_) => "&str".into(),
             Value::Ref(_, RefKind::Shared) => "&".into(),
             Value::Ref(_, RefKind::Mutable) => "&mut".into(),
@@ -263,6 +291,9 @@ pub enum Proj {
     /// `s.as_bytes()`: view a string's bytes as `[u8]`. Only `Index`/`Range`
     /// may follow it.
     Bytes,
+    /// Into a `HashMap`'s table: entry `i`'s key / value.
+    MapKey(usize),
+    MapVal(usize),
 }
 
 impl Place {
@@ -277,6 +308,8 @@ impl Place {
                 Proj::Deref => {}
                 Proj::Range(a, b) => out = format!("{out}[{a}..{b}]"),
                 Proj::Bytes => out = format!("{out}.as_bytes()"),
+                Proj::MapKey(i) => out = format!("{out}[entry {i}].key"),
+                Proj::MapVal(i) => out = format!("{out}[entry {i}].value"),
             }
         }
         out

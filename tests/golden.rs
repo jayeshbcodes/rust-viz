@@ -146,3 +146,8 @@ fn iterators_sample_matches_rustc() {
 fn iter_capacity_sample_matches_rustc() {
     assert_matches_rustc("samples/iter_capacity.rs", "iter_capacity");
 }
+
+#[test]
+fn hashmap_sample_matches_rustc() {
+    assert_matches_rustc("samples/hashmap.rs", "hashmap");
+}

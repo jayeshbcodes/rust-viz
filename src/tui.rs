@@ -310,6 +310,14 @@ fn draw_heap(frame: &mut Frame, area: Rect, step: &Step) {
                         format!("  [{}]", parts.join(", "))
                     }
                     crate::memory::HeapObject::Box(v) => format!("  {}", crate::memory::debug_value(&step.stack, &step.heap, v, false)),
+                    crate::memory::HeapObject::Map { entries, .. } => {
+                        let order = crate::memory::map_order(&step.stack, &step.heap, entries);
+                        let parts: Vec<String> = order
+                            .iter()
+                            .map(|&i| format!("{}: {}", crate::memory::debug_value(&step.stack, &step.heap, &entries[i].0, false), crate::memory::debug_value(&step.stack, &step.heap, &entries[i].1, false)))
+                            .collect();
+                        format!("  {{{}}}", parts.join(", "))
+                    }
                     _ => String::new(),
                 };
                 lines.push(Line::from(vec![

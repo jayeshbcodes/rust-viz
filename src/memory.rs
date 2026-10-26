@@ -186,6 +186,10 @@ pub enum HeapObject {
     /// A `String`'s byte buffer; same `cap` rules as `Vec<u8>`.
     Str { s: String, cap: usize },
     Box(Value),
+    /// A `HashMap`'s hash table. `buckets` is a power of two (0 = not
+    /// allocated yet); it holds up to `capacity()` entries before it must
+    /// grow — hashbrown's 7/8 load factor (verified against rustc).
+    Map { entries: Vec<(Value, Value)>, buckets: usize },
 }
 
 impl HeapObject {
@@ -194,8 +198,38 @@ impl HeapObject {
         match self {
             HeapObject::Vec { cap, .. } | HeapObject::Str { cap, .. } => *cap > 0,
             HeapObject::Box(_) => true,
+            HeapObject::Map { buckets, .. } => *buckets > 0,
         }
     }
+}
+
+/// hashbrown's `bucket_mask_to_capacity`.
+pub fn map_capacity(buckets: usize) -> usize {
+    match buckets {
+        0 => 0,
+        b if b - 1 < 8 => b - 1,
+        b => b / 8 * 7,
+    }
+}
+
+/// hashbrown's `capacity_to_buckets`.
+pub fn map_buckets_for(cap: usize) -> usize {
+    match cap {
+        0 => 0,
+        c if c < 4 => 4,
+        c if c < 8 => 8,
+        c => (c * 8 / 7).next_power_of_two(),
+    }
+}
+
+/// The order a map's entries are iterated/printed in. Real Rust's order is
+/// effectively random (a per-process random hash seed); ours is a fixed
+/// scramble of the keys, so it's just as unordered but reproducible.
+pub fn map_order(stack: &Stack, heap: &Heap, entries: &[(Value, Value)]) -> Vec<usize> {
+    let fnv = |s: &str| s.bytes().fold(0xcbf29ce484222325u64, |h, b| (h ^ b as u64).wrapping_mul(0x100000001b3));
+    let mut idx: Vec<usize> = (0..entries.len()).collect();
+    idx.sort_by_key(|&i| (fnv(&debug_value(stack, heap, &entries[i].0, false)), i));
+    idx
 }
 
 #[derive(Debug, Clone, PartialEq)]
@@ -294,6 +328,9 @@ pub fn describe_heap_object(obj: &HeapObject) -> String {
         HeapObject::Str { s, cap } => format!("String buffer {s:?}  len {} cap {cap}", s.len()),
         HeapObject::Vec { items, cap } => format!("Vec buffer, {} item(s), cap {cap}", items.len()),
         HeapObject::Box(_) => "Box allocation".to_string(),
+        HeapObject::Map { entries, buckets } => {
+            format!("HashMap table, {} entr{}, {buckets} buckets (capacity {})", entries.len(), if entries.len() == 1 { "y" } else { "ies" }, map_capacity(*buckets))
+        }
     }
 }
 
@@ -419,6 +456,13 @@ pub fn resolve<'a>(stack: &'a Stack, heap: &'a Heap, place: &Place) -> Result<Re
                 HeapObject::Box(v) => v,
                 _ => return Err(MemoryError::Dangling(place.describe())),
             },
+            (Proj::MapKey(i) | Proj::MapVal(i), Value::Map(id)) => match heap.get(*id)? {
+                HeapObject::Map { entries, .. } => {
+                    let e = entries.get(*i).ok_or_else(|| MemoryError::Dangling(place.describe()))?;
+                    if matches!(proj, Proj::MapKey(_)) { &e.0 } else { &e.1 }
+                }
+                _ => return Err(MemoryError::Dangling(place.describe())),
+            },
             (Proj::Range(a, b), v) => {
                 let out_of_range = |len| MemoryError::IndexOutOfBounds { len, index: *b };
                 return match v {
@@ -455,7 +499,7 @@ pub fn resolve_mut<'a>(stack: &'a mut Stack, heap: &'a mut Heap, place: &Place) 
         for (i, proj) in place.path.iter().enumerate() {
             let mut partial = place.clone();
             partial.path.truncate(i + 1);
-            if let (Proj::Index(_), Value::Vec(id)) | (Proj::Deref, Value::Box(id)) = (proj, cur) {
+            if let (Proj::Index(_), Value::Vec(id)) | (Proj::Deref, Value::Box(id)) | (Proj::MapVal(_), Value::Map(id)) = (proj, cur) {
                 heap_root = Some((*id, i));
             }
             cur = match resolve(stack, heap, &partial)? {
@@ -473,6 +517,7 @@ pub fn resolve_mut<'a>(stack: &'a mut Stack, heap: &'a mut Heap, place: &Place) 
                     items.get_mut(*n).ok_or(MemoryError::IndexOutOfBounds { len, index: *n })?
                 }
                 (HeapObject::Box(v), Proj::Deref) => v,
+                (HeapObject::Map { entries, .. }, Proj::MapVal(n)) => &mut entries.get_mut(*n).ok_or_else(dangling)?.1,
                 _ => return Err(dangling()),
             };
             (v, &place.path[i + 1..])
@@ -593,6 +638,13 @@ impl fmt::Debug for DebugView<'_> {
                 Ok(HeapObject::Box(inner)) => fmt::Debug::fmt(&self.with(inner), f),
                 _ => f.write_str("<freed>"),
             },
+            Value::Map(id) => match self.heap.get(*id) {
+                Ok(HeapObject::Map { entries, .. }) => {
+                    let order = map_order(self.stack, self.heap, entries);
+                    f.debug_map().entries(order.iter().map(|&i| (self.with(&entries[i].0), self.with(&entries[i].1)))).finish()
+                }
+                _ => f.write_str("<freed>"),
+            },
             Value::Tuple(items) => {
                 let mut t = f.debug_tuple("");
                 for x in items {
@@ -636,6 +688,16 @@ pub fn describe_value(stack: &Stack, heap: &Heap, v: &Value) -> String {
             _ => "Vec <freed>".into(),
         },
         Value::Box(id) => format!("Box → #{id} ({})", debug_value(stack, heap, v, false)),
+        Value::Map(id) => match heap.get(*id) {
+            Ok(HeapObject::Map { entries, buckets: 0 }) => format!("HashMap {}  [len {}, no heap table yet — capacity 0]", debug_value(stack, heap, v, false), entries.len()),
+            Ok(HeapObject::Map { entries, buckets }) => format!(
+                "HashMap {}  [ptr → #{id}, len {}, {buckets} buckets, capacity {}] (iteration order is unspecified)",
+                debug_value(stack, heap, v, false),
+                entries.len(),
+                map_capacity(*buckets)
+            ),
+            _ => "HashMap <freed>".into(),
+        },
         Value::StaticStr(s) => format!("&str {s:?}  (static: lives in the binary, not the heap)"),
         Value::Formatter(_) => "&mut Formatter (collects the text `write!` produces)".into(),
         Value::FnItem(n) => format!("fn {n} (a function used as a value — zero bytes, nothing captured)"),
@@ -682,6 +744,15 @@ pub fn owned_heap_ids(heap: &Heap, v: &Value, out: &mut Vec<HeapId>) {
             out.push(*id);
             if let Ok(HeapObject::Box(inner)) = heap.get(*id) {
                 owned_heap_ids(heap, inner, out);
+            }
+        }
+        Value::Map(id) => {
+            out.push(*id);
+            if let Ok(HeapObject::Map { entries, .. }) = heap.get(*id) {
+                for (k, x) in entries {
+                    owned_heap_ids(heap, k, out);
+                    owned_heap_ids(heap, x, out);
+                }
             }
         }
         Value::Array(items) | Value::Tuple(items) => {

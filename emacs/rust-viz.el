@@ -202,7 +202,7 @@ Returns (STEPS . VISIT-COUNT), or nil if LINE hasn't run yet."
                  (err (and err-line (= line err-line))))
             (when err
               (setq text (concat "✗ " (alist-get 'error rust-viz--trace))))
-            (when (> (cdr visit) 1)
+            (when (and (> (cdr visit) 1) (not (string-empty-p text)))
               (setq text (format "%s  (×%d)" text (cdr visit))))
             (unless (string-empty-p text)
               (goto-char (point-min))

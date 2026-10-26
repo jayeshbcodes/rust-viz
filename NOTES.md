@@ -52,6 +52,7 @@ Reference doesn't specify.
 | `sort_by_key` call count | std calls the key fn on *every comparison* (no caching); slices ≤ 20 use insertion sort — the Book's 3-rectangle example reports 6 calls | Same algorithm for ≤ 20 elements; larger slices compute each key once (call count diverges, order doesn't) | ✅ Correct for ≤ 20 |
 | `FnItem(String)` | A function used as a value is a zero-sized `Copy` value | Same | ✅ Correct |
 | `s.as_bytes()` | A `&[u8]` view of the string's own bytes: borrows the `String`, allocates nothing | `Ref` with a `Proj::Bytes` projection; indexing yields `u8`s; `s.bytes()` iterates them | ✅ Correct |
+| `Map(HeapId)` (`HashMap`) | A 48-byte stack header (confirmed `size_of::<HashMap<i32,i32>>() == 48`) pointing at a heap hash table. `HashMap::new()` doesn't allocate. hashbrown sizing: buckets are a power of two, capacity = buckets−1 below 8 buckets, else 7/8 of them; a full table rehashes into `max(len+1, cap+1)`'s bucket count. **Verified against rustc**: inserts give capacities 0→3→7→14→28→56; `from([3 pairs])` = 3, collecting 5 = 7, `with_capacity(10)` = 14, a clone keeps its size. `insert` moves keys/values in and returns the old value; `entry().or_insert()` returns a `&mut V` that carries the entry's `&mut` borrow of the map. Iteration order is random per process | `HeapObject::Map { entries, buckets }` with exactly those rules; `get`/`get_mut`/`entry`/`map[&k]` return real references into the table (`Proj::MapVal`); iterators borrow (or, `into_iter`, own) the table and can't be reversed | ✅ Correct. Divergences: iteration order is a fixed scramble of the keys (just as unordered, but reproducible run to run); removals are assumed to free a slot (hashbrown can leave a tombstone that doesn't); `or_default()` guesses the value type from existing entries (0 if empty) |
 
 ## Borrow checker model
 
@@ -92,7 +93,7 @@ Reference doesn't specify.
   read by the impl (`f.precision()`) aren't modeled.
 - ~~Closures and iterator chains unsupported~~ — done 2026-10-26 (see the
   ledger rows above). Not yet: `peekable`, `flat_map`/`flatten`, `windows`/
-  `chunks`, `HashMap` collection, `impl Iterator for MyType` (user
+  `chunks`, `HashSet`/`BTreeMap`, `impl Iterator for MyType` (user
   iterators); a closure isn't `Debug`/`Clone`-checked beyond its captures.
 - `format!`'s initial capacity isn't modeled exactly (we allocate `len`;
   real `format!` uses an estimate) — don't trust its `.capacity()`.
