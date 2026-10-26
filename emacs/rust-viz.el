@@ -57,6 +57,17 @@ Error annotations are always shown in full."
   "When `rust-viz-mode' is on, re-run and re-annotate after each save."
   :type 'boolean)
 
+(defcustom rust-viz-detail-window-position 'bottom
+  "Where the stack/heap window opens: a full-width split at the `bottom',
+or a split on the `right'.  It's an ordinary window, so you can resize it
+by dragging its border with the mouse; rust-viz only sets its size when
+it first opens."
+  :type '(choice (const bottom) (const right)))
+
+(defcustom rust-viz-detail-window-size 0.35
+  "Initial size of the stack/heap window, as a fraction of the frame."
+  :type 'number)
+
 (defface rust-viz-annotation-face
   '((t :inherit font-lock-comment-face :slant italic))
   "Face for inline annotations.")
@@ -262,7 +273,10 @@ visible, so closing it isn't undone by moving the cursor)."
   (setq rust-viz--trace (rust-viz--run-process))
   (when (= (length (rust-viz--steps)) 0)
     (user-error "rust-viz: %s" (or (alist-get 'error rust-viz--trace) "nothing ran")))
-  (rust-viz-stepping-mode 1)
+  ;; Already stepping (pressed again): don't re-enter the mode, which would
+  ;; record the buffer's current read-only state as the one to restore.
+  (unless rust-viz-stepping-mode
+    (rust-viz-stepping-mode 1))
   (rust-viz--goto 0))
 
 (defun rust-viz--goto (i)
@@ -309,9 +323,16 @@ visible, so closing it isn't undone by moving the cursor)."
       (unless (derived-mode-p 'special-mode) (special-mode)))))
 
 (defun rust-viz--display-detail ()
-  (display-buffer rust-viz--detail-buffer
-                  '((display-buffer-reuse-window display-buffer-in-side-window)
-                    (side . right) (window-width . 0.45))))
+  "Show the stack/heap window, sizing it only when it first opens — so a
+size you've dragged it to sticks while stepping."
+  (unless (get-buffer-window rust-viz--detail-buffer)
+    (display-buffer rust-viz--detail-buffer
+                    (if (eq rust-viz-detail-window-position 'right)
+                        `((display-buffer-in-direction)
+                          (direction . right) (window . root)
+                          (window-width . ,rust-viz-detail-window-size))
+                      `((display-buffer-at-bottom)
+                        (window-height . ,rust-viz-detail-window-size))))))
 
 (defun rust-viz-next ()
   "Go to the next step."

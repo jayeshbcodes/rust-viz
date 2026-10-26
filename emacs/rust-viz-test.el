@@ -110,4 +110,30 @@
     (rust-viz-clear)
     (should-not (memq #'rust-viz--follow post-command-hook))))
 
+(ert-deftest rust-viz-step-twice-then-quit-restores-writable ()
+  (rust-viz-test--with-sample "ownership.rs"
+    (rust-viz-step)
+    (rust-viz-step)
+    (rust-viz-quit)
+    (should-not buffer-read-only)))
+
+(ert-deftest rust-viz-detail-window-opens-below-and-keeps-its-size ()
+  (rust-viz-test--with-sample "ownership.rs"
+    (switch-to-buffer (current-buffer))
+    (delete-other-windows)
+    (rust-viz-step)
+    (unwind-protect
+        (let ((win (get-buffer-window "*rust-viz*")))
+          (should win)
+          ;; Below the code window, full width.
+          (should (> (nth 1 (window-edges win)) (nth 1 (window-edges (selected-window)))))
+          (should (= (window-total-width win) (frame-width)))
+          ;; A resize (e.g. a mouse drag) survives the next step.
+          (window-resize win 2)
+          (let ((h (window-total-height win)))
+            (rust-viz-next)
+            (should (eq win (get-buffer-window "*rust-viz*")))
+            (should (= h (window-total-height win)))))
+      (rust-viz-quit))))
+
 ;;; rust-viz-test.el ends here
