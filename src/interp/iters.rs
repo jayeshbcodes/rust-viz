@@ -19,6 +19,7 @@ pub(super) struct ClosureDef {
     body: Expr,
     line_base: usize,
     self_ty: Option<String>,
+    module: Vec<String>,
     /// `|x| x * 2` — how the closure is named in frames/events.
     label: String,
 }
@@ -138,6 +139,7 @@ impl Interpreter {
             body: (*c.body).clone(),
             line_base: self.line_offset,
             self_ty: self.current_self_ty(),
+            module: self.cur_mod().to_vec(),
             label,
         }));
         Ok(Value::Closure { id: self.closures.len() - 1, captures, modes, kind })
@@ -435,6 +437,7 @@ impl Interpreter {
         let saved_offset = self.line_offset;
         self.line_offset = def.line_base;
         self.self_tys.push(def.self_ty.clone());
+        self.mod_stack.push(def.module.clone());
 
         let result = (|| -> R<Value> {
             for (i, (name, v)) in captures.iter().enumerate() {
@@ -492,6 +495,7 @@ impl Interpreter {
         };
         self.pop_frame(end)?;
         self.self_tys.pop();
+        self.mod_stack.pop();
         self.line_offset = saved_offset;
         self.cur_line = line;
         // A consumed FnOnce closure: its by-value captures were dropped

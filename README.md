@@ -72,11 +72,12 @@ format specs, hand-written `impl Display`/`impl Debug` with `write!`, the
 `split_whitespace` → `map`/`filter`/`zip`/`enumerate`/`take`/`skip`/`rev`/… →
 `collect`/`sum`/`fold`/`find`/`any`/…), and `HashMap` (`insert`/`get`/
 `entry().or_insert()`/`remove`/iteration/`map[&k]`, with its real table
-growth).
+growth), and inline modules (`mod x { ... }` with `pub`, `use`,
+`crate::`/`self::`/`super::` paths, and E0603 privacy errors).
 
 It does **not** support `HashSet`/`BTreeMap`, `Rc`/`RefCell`, user-defined
-iterators (`impl Iterator`), modules, or external
-crates yet. Anything unsupported stops with a clear "rust-viz doesn't
+iterators (`impl Iterator`), modules in other files (`mod x;`), slice
+patterns (`[a, b, ..]`), `str::parse`, or external crates yet. Anything unsupported stops with a clear "rust-viz doesn't
 support X yet (line N)" message instead of guessing. Because the
 interpreter is dynamically typed, it doesn't type-check: all integers
 behave like `i64`.

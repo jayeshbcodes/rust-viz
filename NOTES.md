@@ -95,6 +95,18 @@ Reference doesn't specify.
   ledger rows above). Not yet: `peekable`, `flat_map`/`flatten`, `windows`/
   `chunks`, `HashSet`/`BTreeMap`, `impl Iterator for MyType` (user
   iterators); a closure isn't `Debug`/`Clone`-checked beyond its captures.
+- ~~Modules unsupported~~ — inline `mod x { ... }` done 2026-10-27:
+  functions/consts in a module are keyed by full path (`ops::add`), structs
+  and enums stay in one flat namespace (two types with the same name in
+  different modules would clash); paths resolve `crate::`/`self::`/
+  `super::`, child modules, `use` (incl. `use m::*`) and same-module names.
+  Privacy (E0603) is checked for functions, consts and modules, not for
+  struct fields or methods. Leniencies: a root-level `use` is visible in
+  every module, and a module's code can name root items without `crate::`.
+  Not yet: `mod x;` loading another file (needs per-file line tracking in
+  steps/trace/JSON/Emacs), `pub(crate)`/`pub(super)` treated as `pub`.
+- Found while writing the modules sample: slice patterns (`[a, b, c]` in
+  `match`) and `str::parse` aren't supported.
 - `format!`'s initial capacity isn't modeled exactly (we allocate `len`;
   real `format!` uses an estimate) — don't trust its `.capacity()`.
 - No per-binding type tracking: reassigning a variable to a value of a

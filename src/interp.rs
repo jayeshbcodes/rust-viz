@@ -110,6 +110,8 @@ struct FnDef {
     block: syn::Block,
     /// The `impl` type this is defined on, for resolving `Self`.
     self_ty: Option<String>,
+    /// The module it's defined in, for resolving paths in its body.
+    module: Vec<String>,
     /// `line_offset` when the definition was fed (REPL), so lines inside
     /// the body map back to what the user typed.
     line_base: usize,
@@ -215,10 +217,22 @@ pub struct Interpreter {
     consts: HashMap<String, Value>,
     trait_defaults: HashMap<String, HashMap<String, Rc<FnDef>>>,
     impls: HashMap<String, Vec<String>>,
-    /// `use List::{Cons, Nil};` → `Cons` ↦ `List::Cons`.
-    aliases: HashMap<String, Vec<String>>,
+    /// `use List::{Cons, Nil};` → `Cons` ↦ `List::Cons`. Keyed by the
+    /// alias's full path (`ops::Cons` inside `mod ops`), and the target is
+    /// kept as written, with the module it was written in.
+    aliases: HashMap<String, (Vec<String>, Vec<String>)>,
     /// `use List::*;` — enums whose variants are nameable unqualified.
     glob_enums: Vec<String>,
+    /// `use some_module::*;` — (where it was written, the path as written).
+    glob_uses: Vec<(Vec<String>, Vec<String>)>,
+    /// Every `mod` in the program by full path (`a::b`) → whether it's `pub`.
+    /// Structs and enums share one namespace whatever module they're in;
+    /// functions and consts in a module are keyed by full path (`ops::add`).
+    modules: HashMap<String, bool>,
+    /// Functions and consts in a module that aren't `pub`, by full path.
+    private: HashSet<String>,
+    /// Module of the code running now (`[]` = crate root), innermost last.
+    mod_stack: Vec<Vec<String>>,
     /// Whether the rest of the program is known up front (a whole file),
     /// so borrows can end right after a reference's last use (NLL). In the
     /// live REPL the future is unknown: a borrow instead ends lazily, when
@@ -273,6 +287,10 @@ impl Interpreter {
             impls: HashMap::new(),
             aliases: HashMap::new(),
             glob_enums: Vec::new(),
+            glob_uses: Vec::new(),
+            modules: HashMap::new(),
+            private: HashSet::new(),
+            mod_stack: vec![Vec::new()],
             lookahead: false,
             live: Vec::new(),
             frame_inv: Vec::new(),
@@ -458,8 +476,8 @@ impl Interpreter {
     fn register_item(&mut self, item: &Item) -> R<()> {
         match item {
             Item::Fn(f) => {
-                let name = f.sig.ident.to_string();
-                let def = FnDef { name: name.clone(), sig: f.sig.clone(), block: (*f.block).clone(), self_ty: None, line_base: self.line_offset };
+                let name = self.qualify(&f.sig.ident.to_string(), &f.vis);
+                let def = FnDef { name: name.clone(), sig: f.sig.clone(), block: (*f.block).clone(), self_ty: None, module: self.cur_mod().to_vec(), line_base: self.line_offset };
                 self.fns.insert(name, Rc::new(def));
             }
             Item::Struct(s) => {
@@ -492,7 +510,7 @@ impl Interpreter {
                 for it in &imp.items {
                     if let syn::ImplItem::Fn(f) = it {
                         let name = format!("{ty}::{}", f.sig.ident);
-                        let def = Rc::new(FnDef { name: name.clone(), sig: f.sig.clone(), block: f.block.clone(), self_ty: Some(ty.clone()), line_base: self.line_offset });
+                        let def = Rc::new(FnDef { name: name.clone(), sig: f.sig.clone(), block: f.block.clone(), self_ty: Some(ty.clone()), module: self.cur_mod().to_vec(), line_base: self.line_offset });
                         // `impl Display` and `impl Debug` both define `fmt`,
                         // so trait methods are also keyed by trait.
                         if let Some(tr) = &tr {
@@ -503,26 +521,44 @@ impl Interpreter {
                 }
             }
             Item::Trait(t) => {
+                let module = self.cur_mod().to_vec();
                 let defaults = self.trait_defaults.entry(t.ident.to_string()).or_default();
                 for it in &t.items {
                     if let syn::TraitItem::Fn(f) = it
                         && let Some(block) = &f.default
                     {
-                        let def = FnDef { name: f.sig.ident.to_string(), sig: f.sig.clone(), block: block.clone(), self_ty: None, line_base: self.line_offset };
+                        let def = FnDef { name: f.sig.ident.to_string(), sig: f.sig.clone(), block: block.clone(), self_ty: None, module: module.clone(), line_base: self.line_offset };
                         defaults.insert(f.sig.ident.to_string(), Rc::new(def));
                     }
                 }
             }
             Item::Const(c) => {
                 let v = self.eval_expr(&c.expr)?;
-                self.consts.insert(c.ident.to_string(), v);
+                let name = self.qualify(&c.ident.to_string(), &c.vis);
+                self.consts.insert(name, v);
             }
             Item::Static(s) => {
                 let v = self.eval_expr(&s.expr)?;
-                self.consts.insert(s.ident.to_string(), v);
+                let name = self.qualify(&s.ident.to_string(), &s.vis);
+                self.consts.insert(name, v);
             }
             Item::Use(u) => self.register_use(&u.tree, Vec::new()),
-            _ => return Err(self.unsupported("this kind of item (only fn/struct/enum/impl/trait/const/use)")),
+            Item::Mod(m) => {
+                let Some((_, items)) = &m.content else {
+                    return Err(self.unsupported(format!(
+                        "`mod {};` loading another file — rust-viz runs one file, so write the module inline: `mod {} {{ ... }}`",
+                        m.ident, m.ident
+                    )));
+                };
+                let mut path = self.cur_mod().to_vec();
+                path.push(m.ident.to_string());
+                self.modules.insert(path.join("::"), !matches!(m.vis, syn::Visibility::Inherited));
+                self.mod_stack.push(path);
+                let r = items.iter().try_for_each(|item| self.register_item(item));
+                self.mod_stack.pop();
+                r?;
+            }
+            _ => return Err(self.unsupported("this kind of item (only fn/struct/enum/impl/trait/const/use/mod)")),
         }
         Ok(())
     }
@@ -536,15 +572,18 @@ impl Interpreter {
         match tree {
             syn::UseTree::Path(p) => self.register_use(&p.tree, with(&p.ident)),
             syn::UseTree::Name(n) => {
-                self.aliases.insert(n.ident.to_string(), with(&n.ident));
+                let key = self.mod_key(&n.ident.to_string());
+                self.aliases.insert(key, (self.cur_mod().to_vec(), with(&n.ident)));
             }
             syn::UseTree::Rename(r) => {
-                self.aliases.insert(r.rename.to_string(), with(&r.ident));
+                let key = self.mod_key(&r.rename.to_string());
+                self.aliases.insert(key, (self.cur_mod().to_vec(), with(&r.ident)));
             }
             syn::UseTree::Glob(_) => {
                 if let Some(last) = prefix.last() {
                     self.glob_enums.push(last.clone());
                 }
+                self.glob_uses.push((self.cur_mod().to_vec(), prefix));
             }
             syn::UseTree::Group(g) => {
                 for t in &g.items {
@@ -578,8 +617,9 @@ impl Interpreter {
         {
             segs[0] = ty;
         }
+        segs = self.module_path(segs);
         if segs.len() == 1 {
-            if let Some(full) = self.aliases.get(&segs[0])
+            if let Some((_, full)) = self.alias(&segs[0])
                 && full.len() >= 2
                 && self.enums.contains_key(&full[full.len() - 2])
             {
@@ -596,6 +636,107 @@ impl Interpreter {
             }
         }
         segs
+    }
+
+    // ─────────────────────────── modules ───────────────────────────
+
+    fn cur_mod(&self) -> &[String] {
+        self.mod_stack.last().map(Vec::as_slice).unwrap_or(&[])
+    }
+
+    /// `add` declared in `mod ops` → `ops::add`.
+    fn mod_key(&self, name: &str) -> String {
+        let mut path = self.cur_mod().to_vec();
+        path.push(name.to_string());
+        path.join("::")
+    }
+
+    /// `mod_key`, also remembering a non-`pub` item for privacy checks.
+    fn qualify(&mut self, name: &str, vis: &syn::Visibility) -> String {
+        let key = self.mod_key(name);
+        if !self.cur_mod().is_empty() && matches!(vis, syn::Visibility::Inherited) {
+            self.private.insert(key.clone());
+        }
+        key
+    }
+
+    /// The `use` alias `name` visible here: one written in this module,
+    /// else (leniently) one at the crate root.
+    fn alias(&self, name: &str) -> Option<&(Vec<String>, Vec<String>)> {
+        self.aliases.get(&self.mod_key(name)).or_else(|| self.aliases.get(name))
+    }
+
+    fn is_item(&self, path: &[String]) -> bool {
+        let key = path.join("::");
+        self.fns.contains_key(&key) || self.consts.contains_key(&key) || self.modules.contains_key(&key)
+    }
+
+    /// Rewrites a path written in module `cur` to start at the crate root:
+    /// `crate::`, `self::`, `super::`, a child module, an item of this
+    /// module, or a `use` that names something in a module.
+    fn absolute(&self, segs: &[String], cur: &[String], follow_use: bool) -> Vec<String> {
+        match segs[0].as_str() {
+            "crate" => return segs[1..].to_vec(),
+            "self" => return [cur, &segs[1..]].concat(),
+            "super" => {
+                let n = segs.iter().take_while(|s| *s == "super").count();
+                return [&cur[..cur.len().saturating_sub(n)], &segs[n..]].concat();
+            }
+            _ => {}
+        }
+        if follow_use && let Some((at, target)) = self.alias(&segs[0]) {
+            let target = self.absolute(target, at, false);
+            if self.modules.contains_key(&target[0]) {
+                return [&target[..], &segs[1..]].concat();
+            }
+        }
+        let local = [cur, segs].concat();
+        if !cur.is_empty() && self.is_item(&local[..=cur.len()]) {
+            return local;
+        }
+        if follow_use {
+            for (at, prefix) in &self.glob_uses {
+                if at.as_slice() != cur {
+                    continue;
+                }
+                let target = self.absolute(prefix, at, false);
+                if self.modules.contains_key(&target.join("::")) && self.is_item(&[&target[..], &segs[..1]].concat()) {
+                    return [&target[..], segs].concat();
+                }
+            }
+        }
+        segs.to_vec()
+    }
+
+    /// Resolves module paths: `ops::add` stays `ops::add` (functions are
+    /// keyed by full path), `shapes::Circle::new` becomes `Circle::new`
+    /// (types aren't).
+    fn module_path(&self, segs: Vec<String>) -> Vec<String> {
+        if self.modules.is_empty() {
+            return segs;
+        }
+        let abs = self.absolute(&segs, self.cur_mod(), true);
+        let k = (1..abs.len()).rev().find(|&k| self.modules.contains_key(&abs[..k].join("::"))).unwrap_or(0);
+        if k > 0 && (self.structs.contains_key(&abs[k]) || self.enums.contains_key(&abs[k])) {
+            return abs[k..].to_vec();
+        }
+        abs
+    }
+
+    /// E0603: a private item is only reachable from inside its module
+    /// (and that module's children); a private module only from its parent.
+    fn check_visible(&self, path: &[String]) -> R<()> {
+        let cur = self.cur_mod();
+        for k in 1..path.len() {
+            if self.modules.get(&path[..k].join("::")) == Some(&false) && !cur.starts_with(&path[..k - 1]) {
+                return compile_err(format!("module `{}` is private (E0603)", path[k - 1]));
+            }
+        }
+        if self.private.contains(&path.join("::")) && !cur.starts_with(&path[..path.len() - 1]) {
+            let what = if self.consts.contains_key(&path.join("::")) { "constant" } else { "function" };
+            return compile_err(format!("{what} `{}` is private (E0603)", path[path.len() - 1]));
+        }
+        Ok(())
     }
 
     // ─────────────────────────── frames ────────────────────────────
@@ -1640,6 +1781,16 @@ impl Interpreter {
     /// unit enum variants, `i32::MAX`.
     fn eval_path_value(&mut self, path: &syn::Path) -> R<Value> {
         let segs = self.resolve_path_segments(path);
+        if segs.len() > 1 && self.modules.contains_key(&segs[0]) {
+            self.check_visible(&segs)?;
+            let key = segs.join("::");
+            if let Some(v) = self.consts.get(&key) {
+                return Ok(v.clone());
+            }
+            if self.fns.contains_key(&key) {
+                return Ok(Value::FnItem(key));
+            }
+        }
         match segs.as_slice() {
             [n] if n == "None" => Ok(option_none()),
             [n] => {
@@ -2436,6 +2587,7 @@ impl Interpreter {
         }
         let Expr::Path(p) = &*call.func else { unreachable!() };
         let segs = self.resolve_path_segments(&p.path);
+        self.check_visible(&segs)?;
         let mut args = Vec::new();
         for a in &call.args {
             args.push(self.eval_arg(a)?);
@@ -2560,6 +2712,7 @@ impl Interpreter {
         let saved_offset = self.line_offset;
         self.line_offset = def.line_base;
         self.self_tys.push(def.self_ty.clone());
+        self.mod_stack.push(def.module.clone());
 
         let result = (|| -> R<Value> {
             if let Some(sv) = self_arg {
@@ -2602,6 +2755,7 @@ impl Interpreter {
         }
         self.pop_frame(close)?;
         self.self_tys.pop();
+        self.mod_stack.pop();
         self.line_offset = saved_offset;
         self.cur_line = call_line;
         Ok(result)
@@ -3598,8 +3752,7 @@ impl Interpreter {
             }
             Pat::Path(pp) => {
                 let segs = self.resolve_path_segments(&pp.path);
-                if segs.len() == 1
-                    && let Some(c) = self.consts.get(&segs[0]).cloned()
+                if let Some(c) = self.consts.get(&segs.join("::")).cloned()
                 {
                     let Got::Val(cur) = got else { return Ok(false) };
                     return Ok(self.compare(&cur, &c)? == Some(std::cmp::Ordering::Equal));

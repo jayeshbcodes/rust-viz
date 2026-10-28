@@ -238,3 +238,41 @@ fn hashmap_entry_borrow_ends_after_last_use_and_heap_is_freed() {
     assert_eq!(interp.output, "2 3\n");
     assert_eq!(interp.steps.last().unwrap().heap.live_count(), 0);
 }
+
+#[test]
+fn private_function_in_module() {
+    let e = err_of("mod ops { fn secret() -> i32 { 1 } } fn main() { let x = ops::secret(); }");
+    assert!(e.contains("E0603") && e.contains("secret"), "{e}");
+}
+
+#[test]
+fn private_module() {
+    let e = err_of("mod a { mod b { pub fn f() {} } } fn main() { a::b::f(); }");
+    assert!(e.contains("E0603") && e.contains("module `b`"), "{e}");
+}
+
+#[test]
+fn file_module_is_reported() {
+    let e = err_of("mod ops; fn main() {}");
+    assert!(e.contains("mod ops { ... }"), "{e}");
+}
+
+#[test]
+fn private_items_visible_to_children() {
+    // A child module may use its parent's private items (and its own
+    // module's, unqualified); a glob `use` brings a module's items in.
+    let src = r#"
+mod outer {
+    fn helper() -> i32 { 40 }
+    pub mod inner {
+        pub fn get() -> i32 { super::helper() + two() }
+        fn two() -> i32 { 2 }
+    }
+}
+use outer::inner::*;
+fn main() { println!("{}", get()); }
+"#;
+    let (interp, result) = Interpreter::run_program(src);
+    result.unwrap();
+    assert_eq!(interp.output, "42\n");
+}
