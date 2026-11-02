@@ -306,3 +306,25 @@ fn main() {
 ```
 
 `len()` counts bytes, not characters: `"é".len()` is 2.
+
+### 15. A `char` is 1–4 bytes; continuation bytes look like `10xxxxxx`
+
+UTF-8 marks every byte: `0xxxxxxx` is a whole ASCII character,
+`110xxxxx`/`1110xxxx`/`11110xxx` start a 2/3/4-byte character, and
+`10xxxxxx` continues one. From any position you can find a character's
+start by skipping continuation bytes, and from a start byte you can read
+the character's length (its number of leading 1s).
+
+```rust ok
+fn main() {
+    let s = "hé!";
+    let bytes = s.as_bytes();
+    let continuation = bytes.iter().filter(|b| **b & 0b1100_0000 == 0b1000_0000).count();
+    println!("{} bytes, {} chars, {} continuation byte", s.len(), s.chars().count(), continuation);
+}
+```
+
+That's why `s.len()` counts bytes, why you can't index a `String` by
+position (`s[1]` doesn't compile), and why slicing in the middle of a
+character (`&"hé"[0..2]`) panics. *Java* strings are UTF-16: an emoji takes
+two `char`s (a surrogate pair), the same idea with 2-byte units.
