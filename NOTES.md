@@ -117,6 +117,9 @@ Reference doesn't specify.
   `as_bytes().to_vec()`, `extend_from_slice` of bytes, `let v: Vec<u8>`,
   a struct field declared `Vec<u8>`/`Vec<i8>`/`Vec<bool>`, or a clone of
   one. Other `Vec<u8>`s (e.g. `vec![1u8, 2]` unannotated) still use 4.
+- `Result` combinators `ok`/`err`/`map`/`map_err`/`and_then`/
+  `unwrap_or_else`/`is_ok_and` — added 2026-11-01, **verified against
+  rustc** (`samples/result_methods.rs`). The discarded side is dropped.
 - Found while writing the modules sample: slice patterns (`[a, b, c]` in
   `match`) and `str::parse` aren't supported.
 - `format!`'s initial capacity isn't modeled exactly (we allocate `len`;

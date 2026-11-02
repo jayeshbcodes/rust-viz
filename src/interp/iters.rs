@@ -1067,6 +1067,44 @@ impl Interpreter {
                 let _ = variant;
                 Ok(Some(out))
             }
+            // ── Result: `ok`/`err` to an Option, and the closure combinators
+            (Got::Val(Value::Enum { ty, .. }), "ok" | "err" | "map" | "map_err" | "and_then" | "unwrap_or_else" | "is_ok_and") if ty == "Result" => {
+                eval_args(self, &mut args)?;
+                let mut f = args.into_iter().next();
+                let Value::Enum { variant, fields, .. } = self.read_place(recv)? else { unreachable!() };
+                let x = fields.into_iter().next().map_or(Value::Unit, |(_, v)| v);
+                let ok = variant == "Ok";
+                let mut call = |this: &mut Self, x: Value| match f.as_mut() {
+                    Some(f) => this.call_value(f, vec![x], line, ClosureKind::FnOnce),
+                    None => Ok(Value::Unit),
+                };
+                let out = match (method, ok) {
+                    ("ok", true) | ("err", false) => option_some(x),
+                    ("ok", false) | ("err", true) => {
+                        self.drop_value(&x)?;
+                        option_none()
+                    }
+                    ("map", true) => result_ok_with(call(self, x)?),
+                    ("map_err", false) => result_err(call(self, x)?),
+                    ("and_then", true) => call(self, x)?,
+                    ("unwrap_or_else", true) => x,
+                    ("unwrap_or_else", false) => call(self, x)?,
+                    ("is_ok_and", true) => {
+                        let r = call(self, x)?;
+                        Value::Bool(self.truthy(r)?)
+                    }
+                    ("is_ok_and", false) => {
+                        self.drop_value(&x)?;
+                        Value::Bool(false)
+                    }
+                    (_, true) => result_ok_with(x),
+                    (_, false) => result_err(x),
+                };
+                if let Some(f) = &f {
+                    self.drop_value(f)?;
+                }
+                Ok(Some(out))
+            }
             // ── Vec + closures
             (Got::Val(Value::Vec(id)), "retain" | "sort" | "sort_unstable" | "sort_by_key" | "reverse" | "dedup") => {
                 let id = *id;

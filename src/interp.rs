@@ -4226,6 +4226,11 @@ fn is_byte_vec_type(t: &str) -> bool {
     matches!(t.replace(' ', "").as_str(), "Vec<u8>" | "Vec<i8>" | "Vec<bool>")
 }
 
+fn result_ok_with(v: Value) -> Value {
+    let copy = v.is_copy();
+    Value::Enum { ty: "Result".into(), variant: "Ok".into(), fields: vec![("0".into(), v)], copy }
+}
+
 fn result_err(e: Value) -> Value {
     let copy = e.is_copy();
     Value::Enum { ty: "Result".into(), variant: "Err".into(), fields: vec![("0".into(), e)], copy }

@@ -166,3 +166,8 @@ fn utf8_sample_matches_rustc() {
 fn byte_vec_sample_matches_rustc() {
     assert_matches_rustc("samples/byte_vec.rs", "byte_vec");
 }
+
+#[test]
+fn result_methods_sample_matches_rustc() {
+    assert_matches_rustc("samples/result_methods.rs", "result_methods");
+}
