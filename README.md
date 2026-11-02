@@ -117,6 +117,15 @@ line where it stopped. The commands work without `rust-viz-mode` too.
 Any editor can build the same integration on `rust-viz --json <file|->`;
 the format is documented at the top of `src/json.rs`.
 
+## Golden rules cheatsheet
+
+[GOLDEN_RULES.md](GOLDEN_RULES.md) collects the rules that keep coming up
+when learning Rust (moves, `Copy`, borrowing, receivers, modules, traits),
+each with the smallest program that shows it, and *Java* comparisons. Every
+example is checked against both `rustc` and rust-viz by
+`tests/golden_rules.rs`, so you can run any of them and watch the rule
+happen.
+
 ## Accuracy
 
 The whole point is to teach a *correct* mental model, so accuracy is

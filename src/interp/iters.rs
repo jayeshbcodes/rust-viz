@@ -1071,7 +1071,7 @@ impl Interpreter {
             (Got::Val(Value::Vec(id)), "retain" | "sort" | "sort_unstable" | "sort_by_key" | "reverse" | "dedup") => {
                 let id = *id;
                 eval_args(self, &mut args)?;
-                self.check_write(recv, false)?;
+                self.check_mut_call(recv)?;
                 let HeapObject::Vec { items, .. } = self.heap.get(id)? else { unreachable!() };
                 let mut items = items.clone();
                 match method {
@@ -1204,7 +1204,7 @@ impl Interpreter {
     fn iterator_method(&mut self, method: &str, recv: &PlaceRef, args: Vec<Value>, turbofish: Option<String>, line: usize) -> R<Value> {
         if method == "next" || method == "next_back" {
             // `&mut self`: needs `let mut it`.
-            self.check_write(recv, false)?;
+            self.check_mut_call(recv)?;
             let Got::Val(Value::Iter(mut node)) = self.got(&recv.place)? else { unreachable!() };
             let item = if method == "next" { self.iter_next(&mut node, line)? } else { self.iter_next_back(&mut node, line)? };
             *resolve_mut(&mut self.stack, &mut self.heap, &recv.place)? = Value::Iter(node);

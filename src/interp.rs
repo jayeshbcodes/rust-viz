@@ -1369,6 +1369,16 @@ impl Interpreter {
         }
     }
 
+    /// A `&mut self` method call (`v.push(x)`): a mutable borrow of the
+    /// receiver, so a live borrow of it is a borrow conflict (E0502/E0499),
+    /// not an assignment while borrowed (E0506).
+    fn check_mut_call(&mut self, p: &PlaceRef) -> R<()> {
+        match self.check_write(p, false) {
+            Err(Flow::Err(InterpError::Memory(MemoryError::AssignWhileBorrowed(n)))) => Err(MemoryError::BorrowConflict(n).into()),
+            r => r,
+        }
+    }
+
     /// `&place` / `&mut place` — this is the borrow-checker rule enforced
     /// at our runtime: `access` returns an error if the place is already
     /// moved or borrowed incompatibly, exactly the "one mutable XOR many
@@ -2387,7 +2397,7 @@ impl Interpreter {
                     Value::Str(id) => {
                         // `write!` into a `String` (needs `use std::fmt::Write`).
                         if let Some(p) = self.eval_place(dest)? {
-                            self.check_write(&p, false)?;
+                            self.check_mut_call(&p)?;
                         }
                         self.str_append(id, &text)?;
                         self.pending.push(Event::Mutate { name: dest.to_token_stream().to_string() });
@@ -3052,7 +3062,7 @@ impl Interpreter {
             // ── mutating String
             (Got::Val(Value::Str(id)), "push_str" | "push") => {
                 let id = *id;
-                self.check_write(&recv, false)?;
+                self.check_mut_call(&recv)?;
                 let text = match args.first() {
                     Some(Value::Char(c)) if method == "push" => c.to_string(),
                     Some(a) if method == "push_str" => match self.text_of(a)? {
@@ -3070,7 +3080,7 @@ impl Interpreter {
             }
             (Got::Val(Value::Str(id)), "pop" | "clear") => {
                 let id = *id;
-                self.check_write(&recv, false)?;
+                self.check_mut_call(&recv)?;
                 let HeapObject::Str { s, .. } = self.heap.get_mut(id)? else { unreachable!() };
                 let out = if method == "pop" { s.pop().map(Value::Char).map_or_else(option_none, option_some) } else {
                     s.clear();
@@ -3082,7 +3092,7 @@ impl Interpreter {
             // ── mutating Vec
             (Got::Val(Value::Vec(id)), "push" | "insert") => {
                 let id = *id;
-                self.check_write(&recv, false)?;
+                self.check_mut_call(&recv)?;
                 let len = match self.heap.get(id)? {
                     HeapObject::Vec { items, .. } => items.len(),
                     _ => 0,
@@ -3107,7 +3117,7 @@ impl Interpreter {
             // all of them, like std.
             (Got::Val(Value::Vec(id)), "extend_from_slice") => {
                 let id = *id;
-                self.check_write(&recv, false)?;
+                self.check_mut_call(&recv)?;
                 let Some(Value::Ref(src, _)) = args.first() else {
                     return compile_err("`extend_from_slice` expects a slice `&[T]` (E0308)");
                 };
@@ -3130,7 +3140,7 @@ impl Interpreter {
             }
             (Got::Val(Value::Vec(id)), "pop" | "remove" | "clear" | "truncate") => {
                 let id = *id;
-                self.check_write(&recv, false)?;
+                self.check_mut_call(&recv)?;
                 let i = if matches!(method, "remove" | "truncate") { Some(self.arg_usize(&args, 0)?) } else { None };
                 let HeapObject::Vec { items, .. } = self.heap.get_mut(id)? else { unreachable!() };
                 let len = items.len();

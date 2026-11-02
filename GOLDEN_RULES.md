@@ -1,0 +1,308 @@
+# Rust golden rules
+
+The rules that keep coming up when you learn Rust, each with the smallest
+program that shows it. Every example here is checked by `tests/golden_rules.rs`:
+blocks marked `ok` must compile and print the same under `rustc` and rust-viz,
+and blocks marked with an error code must be rejected by both with that code.
+Run any of them through rust-viz to watch it happen.
+
+## Ownership and moves
+
+### 1. Every value has one owner; `=` moves it
+
+Assigning a `String` (or passing it to a function) moves ownership. The old
+variable can't be used afterwards.
+
+```rust E0382
+fn main() {
+    let s1 = String::from("hi");
+    let s2 = s1;
+    println!("{s1} {s2}");
+}
+```
+
+*Java:* both variables would point at the same object. Rust has exactly one
+owner, so the heap buffer is freed exactly once.
+
+### 2. `Copy` is for types that own no heap memory
+
+`i32`, `f64`, `bool`, `char` and references are fully described by their
+stack bytes, so `=` duplicates them instead of moving.
+
+```rust ok
+fn main() {
+    let a = 5;
+    let b = a;
+    println!("{a} {b}");
+}
+```
+
+A `String` is a stack header (ptr, len, cap) pointing at a heap buffer;
+copying just the header would give two owners of one buffer. So it moves.
+
+### 3. Formatting macros borrow; they never move
+
+`println!` and `format!` take `&` of each argument for you.
+
+```rust ok
+fn main() {
+    let s1 = String::from("Hello");
+    let s2 = format!("{s1}, world");
+    println!("{s1} | {s2}");
+}
+```
+
+`format!` allocates a brand-new String; `s1`'s buffer is only read.
+
+## Borrowing
+
+### 4. Many `&` readers, or one `&mut` writer, never both
+
+```rust E0499
+fn main() {
+    let mut s = String::from("hi");
+    let r1 = &mut s;
+    let r2 = &mut s;
+    println!("{r1} {r2}");
+}
+```
+
+```rust E0502
+fn main() {
+    let mut v = vec![1, 2, 3];
+    let first = &v[0];
+    v.push(4);
+    println!("{first}");
+}
+```
+
+`push` may reallocate the buffer `first` points into, which is why rustc
+refuses it.
+
+### 5. While a borrow is in use, the owner can't be moved, changed or dropped
+
+```rust E0505
+fn main() {
+    let s = String::from("hi");
+    let r = &s;
+    let t = s;
+    println!("{r} {t}");
+}
+```
+
+"In use" means *used later*: a borrow ends at its last use (non-lexical
+lifetimes). Same lines, reordered, compile fine:
+
+```rust ok
+fn main() {
+    let s = String::from("hi");
+    let r = &s;
+    println!("{r}");
+    let t = s;
+    println!("{t}");
+}
+```
+
+### 6. No dangling references, ever (in safe Rust)
+
+A reference can't outlive what it points at.
+
+```rust E0106
+fn dangle() -> &String {
+    let s = String::from("hi");
+    &s
+}
+fn main() {
+    let r = dangle();
+    println!("{r}");
+}
+```
+
+Return the owned value instead (`-> String`), and ownership moves to the
+caller. *Java* avoids dangling pointers with a garbage collector; Rust proves
+it at compile time instead.
+
+### 7. A struct can't borrow itself, but it can borrow from outside
+
+Moving a struct copies its bytes to a new place, so a reference into itself
+would dangle; the compiler won't allow one. A borrow of *someone else's*
+data is fine: the lifetime `'a` ties the struct to the owner.
+
+```rust ok
+struct View<'a> {
+    bytes: &'a [u8],
+}
+fn main() {
+    let owner = String::from("hello");
+    let view = View { bytes: owner.as_bytes() };
+    println!("{}", view.bytes.len());
+}
+```
+
+## Methods
+
+### 8. The receiver says what a method does to its value
+
+| Receiver | Method gets | Caller needs |
+|---|---|---|
+| `&self` | a read-only borrow | any `s` |
+| `&mut self` | an exclusive, mutable borrow | `let mut s` |
+| `self` | ownership | `s` is gone afterwards |
+
+Forgetting `mut` in `&mut self`:
+
+```rust E0596
+struct Counter {
+    n: Vec<i32>,
+}
+impl Counter {
+    fn add(&self, x: i32) {
+        self.n.push(x);
+    }
+}
+fn main() {
+    let mut c = Counter { n: Vec::new() };
+    c.add(1);
+}
+```
+
+Calling a `&mut self` method needs a `mut` variable, too:
+
+```rust E0596
+fn main() {
+    let s = String::from("hi");
+    s.push_str("!");
+    println!("{s}");
+}
+```
+
+*Java:* any method can change `this`. In Rust the signature alone tells you.
+
+### 9. Methods that change in place return `()`
+
+`push_str`, `push`, `clear` change their receiver and return nothing.
+
+```rust E0277
+fn main() {
+    let mut s1 = String::from("Hello");
+    let s2 = s1.push_str(" Rust");
+    println!("{s1} {s2}");
+}
+```
+
+*Java's* `StringBuilder.append` returns the builder; Rust's `push_str` is
+like a `void` method.
+
+## Patterns
+
+### 10. Struct patterns match by field name; tuple patterns by position
+
+```rust ok
+enum Message {
+    Resize { width: u64, height: u64 },
+    Color(u8, u8, u8),
+}
+fn main() {
+    let msgs = [Message::Resize { height: 30, width: 10 }, Message::Color(1, 2, 3)];
+    for m in &msgs {
+        match m {
+            Message::Resize { width, height } => println!("{width}x{height}"),
+            Message::Color(r, g, b) => println!("{r} {g} {b}"),
+        }
+    }
+}
+```
+
+Names after `field:` are new variables, never types: `{ width: w, .. }`
+binds `w`; `{ x: u64 }` binds a variable called `u64`.
+
+## Modules
+
+### 11. The parent declares a module; `use` only shortens a path
+
+`mod ops;` means "paste `ops.rs` here as `mod ops { ... }`". No `mod` line,
+no module: files are never picked up automatically. Write `mod` once, in the
+parent; write `use` wherever you want a shorter name.
+
+```rust ok
+mod ops {
+    pub fn add(a: i32, b: i32) -> i32 {
+        a + b
+    }
+}
+use ops::add;
+fn main() {
+    println!("{}", add(2, 3));
+}
+```
+
+*Java:* `mod` ≈ package (declared by the parent, not the file), `use` ≈
+`import`.
+
+### 12. Private by default; `pub` opens one door at a time
+
+A private item is visible in its own module and that module's children.
+Reaching it from outside needs `pub` on the item *and* on every module
+along the path.
+
+```rust E0603
+mod ops {
+    fn secret() -> i32 {
+        42
+    }
+}
+fn main() {
+    println!("{}", ops::secret());
+}
+```
+
+## Traits
+
+### 13. `{}` needs `Display`; you implement it, there's no derive
+
+```rust E0277
+struct Point {
+    x: i32,
+}
+fn main() {
+    let p = Point { x: 1 };
+    println!("{p}");
+}
+```
+
+```rust ok
+use std::fmt;
+struct Point {
+    x: i32,
+}
+impl fmt::Display for Point {
+    fn fmt(&self, f: &mut fmt::Formatter) -> fmt::Result {
+        write!(f, "({})", self.x)
+    }
+}
+fn main() {
+    let p = Point { x: 1 };
+    println!("{p}");
+}
+```
+
+`impl Trait for Type` ≈ *Java's* `implements`, one block per trait. You may
+implement a trait only if you own the trait or the type (the orphan rule).
+
+## Strings
+
+### 14. `String` owns (ptr, len, cap); `&str` borrows (ptr, len)
+
+A `String` grows by reallocating: new capacity is `max(2 × cap, needed, 8)`.
+A `&str` can never grow; it's a view into bytes someone else owns.
+
+```rust ok
+fn main() {
+    let mut s = String::from("hello");
+    s.push_str(" world");
+    let word: &str = &s[0..5];
+    println!("{word} {} {}", s.len(), s.capacity());
+}
+```
+
+`len()` counts bytes, not characters: `"é".len()` is 2.

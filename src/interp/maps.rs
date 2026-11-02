@@ -130,7 +130,7 @@ impl Interpreter {
         };
         let out = match method {
             "insert" => {
-                self.check_write(recv, false)?;
+                self.check_mut_call(recv)?;
                 let mut it = args.into_iter();
                 let (k, v) = (it.next().unwrap_or(Value::Unit), it.next().unwrap_or(Value::Unit));
                 let old = self.map_insert(id, k, v)?;
@@ -143,7 +143,7 @@ impl Interpreter {
             "get" | "get_mut" | "contains_key" | "remove" => {
                 let key = args.first().cloned().unwrap_or(Value::Unit);
                 if matches!(method, "get_mut" | "remove") {
-                    self.check_write(recv, false)?;
+                    self.check_mut_call(recv)?;
                 } else {
                     read(self)?;
                 }
@@ -174,7 +174,7 @@ impl Interpreter {
                 }
             }
             "clear" => {
-                self.check_write(recv, false)?;
+                self.check_mut_call(recv)?;
                 for (k, v) in self.map_entries(id)? {
                     self.drop_value(&k)?;
                     self.drop_value(&v)?;
@@ -206,7 +206,7 @@ impl Interpreter {
                 Value::Iter(Box::new(self.node_from(v)?))
             }
             "extend" => {
-                self.check_write(recv, false)?;
+                self.check_mut_call(recv)?;
                 let v = args.into_iter().next().unwrap_or(Value::Unit);
                 let mut node = self.node_from(v)?;
                 self.map_extend(id, &mut node, line)?;
