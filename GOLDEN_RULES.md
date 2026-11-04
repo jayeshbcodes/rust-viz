@@ -348,3 +348,24 @@ fn main() {
 In rust-viz the `truncate` line shows no heap event; the `to_vec` line shows
 an allocation and a free. To hand memory back on purpose, use
 `shrink_to_fit()`.
+
+### 17. A small fixed-size stack buffer beats a temporary heap value
+
+`c.to_string()` allocates a heap `String` just to hold 1–4 bytes, then
+frees it. When you know the maximum size up front, a stack array does the
+same job with no heap at all: `[u8; 4]` fits any `char` in UTF-8.
+
+```rust ok
+fn main() {
+    let mut out: Vec<u8> = Vec::new();
+    for c in ['h', 'é', '😀'] {
+        let mut buf = [0u8; 4];
+        out.extend_from_slice(c.encode_utf8(&mut buf).as_bytes());
+    }
+    println!("{:?}", out);
+}
+```
+
+In rust-viz the only heap object is `out`'s buffer; the `to_string()`
+version shows an allocate + free for every character. `encode_utf8`
+returns a `&mut str` that borrows `buf`, so it can't outlive it (rule 6).
