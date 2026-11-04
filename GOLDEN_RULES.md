@@ -328,3 +328,23 @@ That's why `s.len()` counts bytes, why you can't index a `String` by
 position (`s[1]` doesn't compile), and why slicing in the middle of a
 character (`&"hé"[0..2]`) panics. *Java* strings are UTF-16: an emoji takes
 two `char`s (a surrogate pair), the same idea with 2-byte units.
+
+### 16. Shrinking a Vec keeps its buffer; rebuilding it allocates a new one
+
+`truncate`, `clear` and `pop` only lower the length: same heap buffer, same
+capacity, nothing copied. Assigning a fresh copy (`v = v[..i].to_vec()`)
+allocates a new buffer, copies the kept elements, and frees the old one.
+
+```rust ok
+fn main() {
+    let mut v = vec![1, 2, 3, 4];
+    v.truncate(2);
+    println!("{:?} cap {}", v, v.capacity());
+    v = v[..1].to_vec();
+    println!("{:?} cap {}", v, v.capacity());
+}
+```
+
+In rust-viz the `truncate` line shows no heap event; the `to_vec` line shows
+an allocation and a free. To hand memory back on purpose, use
+`shrink_to_fit()`.
