@@ -320,11 +320,17 @@ visible, so closing it isn't undone by moving the cursor)."
     (message "rust-viz: step %d/%d%s   n/p step · g/G first/last · q quit" (1+ i) n
              (if (= line 0) " (end of program)" ""))))
 
+;; `output_len' counts UTF-8 bytes (as Rust's `String::len' does), while
+;; Emacs strings index by character: slice the encoded bytes, not the string.
+(defun rust-viz--output-prefix (output nbytes)
+  "The first NBYTES bytes of OUTPUT, as text."
+  (let ((bytes (encode-coding-string output 'utf-8 t)))
+    (decode-coding-string (substring bytes 0 (min nbytes (length bytes))) 'utf-8)))
+
 (defun rust-viz--detail-text (step i n)
   "Full stack/heap/events text for STEP (index I of N), plus output so far."
-  (let ((output (substring (alist-get 'output rust-viz--trace) 0
-                           (min (alist-get 'output_len step)
-                                (length (alist-get 'output rust-viz--trace)))))
+  (let ((output (rust-viz--output-prefix (alist-get 'output rust-viz--trace)
+                                         (alist-get 'output_len step)))
         (err (and (= i (1- n)) (alist-get 'error rust-viz--trace))))
     (concat (alist-get 'detail step)
             (if err (concat "\n" (propertize (concat "✗ " err) 'face 'rust-viz-error-face) "\n") "")

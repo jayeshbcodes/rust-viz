@@ -30,6 +30,12 @@
                                  (substring-no-properties (overlay-get ov 'after-string))))
                (overlays-in eol eol)))))
 
+(ert-deftest rust-viz-output-prefix-counts-bytes ()
+  ;; "é" is 2 bytes: 3 bytes of "éab" is "éa", not "éab".
+  (should (equal (rust-viz--output-prefix "éab" 3) "éa"))
+  (should (equal (rust-viz--output-prefix "€😀\n" 7) "€😀"))
+  (should (equal (rust-viz--output-prefix "abc" 99) "abc")))
+
 (ert-deftest rust-viz-run-annotates-lines ()
   (rust-viz-test--with-sample "ownership.rs"
     (rust-viz-run)
