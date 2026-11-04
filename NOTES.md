@@ -120,6 +120,11 @@ Reference doesn't specify.
 - `Result` combinators `ok`/`err`/`map`/`map_err`/`and_then`/
   `unwrap_or_else`/`is_ok_and` — added 2026-11-01, **verified against
   rustc** (`samples/result_methods.rs`). The discarded side is dropped.
+- `char::encode_utf8(&mut buf)` — added 2026-11-03, **verified against
+  rustc** (`samples/encode_utf8.rs`): writes the bytes into the caller's
+  buffer (no heap) and returns a `&mut str` view of `buf[..n]`
+  (`Proj::Utf8` + `Range`); `.as_bytes()` on it is the buffer itself. The
+  too-small-buffer panic message matches std's.
 - Found while writing the modules sample: slice patterns (`[a, b, c]` in
   `match`) and `str::parse` aren't supported.
 - `format!`'s initial capacity isn't modeled exactly (we allocate `len`;

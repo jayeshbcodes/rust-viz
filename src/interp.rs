@@ -2915,7 +2915,7 @@ impl Interpreter {
         }
         // Builtins only read their reference arguments, except the ones
         // that store or hand back an argument (or release it themselves).
-        let borrowed: Vec<Value> = if matches!(method.as_str(), "push" | "insert" | "unwrap_or" | "push_str") {
+        let borrowed: Vec<Value> = if matches!(method.as_str(), "push" | "insert" | "unwrap_or" | "push_str" | "encode_utf8") {
             vec![]
         } else {
             args.iter().filter(|a| matches!(a, Value::Ref(..))).cloned().collect()
@@ -3208,6 +3208,32 @@ impl Interpreter {
                 }
             }
             // ── chars
+            // Writes the UTF-8 bytes into the caller's buffer (usually a
+            // `[u8; 4]` on the stack) and returns a `&mut str` borrowing it.
+            (Got::Val(Value::Char(c)), "encode_utf8") => {
+                let c = *c;
+                let Some(Value::Ref(buf, RefKind::Mutable)) = args.first().cloned() else {
+                    return compile_err("`encode_utf8` expects a `&mut [u8]` buffer (E0308)");
+                };
+                let mut tmp = [0u8; 4];
+                let n = c.encode_utf8(&mut tmp).len();
+                let Value::Array(items) = resolve_mut(&mut self.stack, &mut self.heap, &buf)? else {
+                    return compile_err("`encode_utf8` expects a `&mut [u8]` buffer (E0308)");
+                };
+                if items.len() < n {
+                    let have = items.len();
+                    return panic_err(format!("encode_utf8: need {n} bytes to encode U+{:X}, but the buffer has {have}", c as u32));
+                }
+                for (slot, b) in items.iter_mut().zip(&tmp[..n]) {
+                    *slot = Value::Int(*b as i64);
+                }
+                self.pending.push(Event::Mutate { name: buf.describe() });
+                self.pending.push(Event::Note(format!("`{c:?}` encoded as {n} UTF-8 byte(s) into `{}` — on the stack, no heap allocation", buf.describe())));
+                let mut view = buf.clone();
+                view.path.push(Proj::Utf8);
+                view.path.push(Proj::Range(0, n));
+                Ok(Value::Ref(view, RefKind::Mutable))
+            }
             (Got::Val(Value::Char(c)), _) => {
                 let c = *c;
                 Ok(match method {

@@ -1026,6 +1026,11 @@ impl Interpreter {
                 // A `&[u8]` view of the same bytes: borrows the string,
                 // allocates nothing.
                 let mut p = recv.clone();
+                // A `str` view of a byte buffer: its bytes are the buffer.
+                if let Some(k) = p.place.path.iter().position(|x| *x == Proj::Utf8) {
+                    p.place.path.remove(k);
+                    return Ok(Some(self.borrow_place(p, false)?));
+                }
                 match p.place.path.last().cloned() {
                     Some(Proj::Range(a, b)) => {
                         p.place.path.pop();
