@@ -57,6 +57,12 @@ Error annotations are always shown in full."
   "When `rust-viz-mode' is on, re-run and re-annotate after each save."
   :type 'boolean)
 
+(defcustom rust-viz-clear-on-edit t
+  "Remove the annotations as soon as the buffer is edited.
+They describe the code as it was when it ran, so after an edit they're
+stale; \[rust-viz-run] brings them back."
+  :type 'boolean)
+
 (defcustom rust-viz-detail-window-position 'bottom
   "Where the stack/heap window opens: a full-width split at the `bottom',
 or a split on the `right'.  It's an ordinary window, so you can resize it
@@ -185,8 +191,12 @@ Returns (STEPS . VISIT-COUNT), or nil if LINE hasn't run yet."
   (interactive)
   (remove-overlays (point-min) (point-max) 'rust-viz t)
   (remove-hook 'post-command-hook #'rust-viz--follow t)
+  (remove-hook 'after-change-functions #'rust-viz--clear-on-change t)
   (setq rust-viz--line-overlay nil
         rust-viz--follow-line nil))
+
+(defun rust-viz--clear-on-change (&rest _)
+  (rust-viz-clear))
 
 (defun rust-viz--annotate (upto)
   "Annotate each line with what its latest execution up to step UPTO did."
@@ -230,6 +240,8 @@ already showing."
         (message "rust-viz: %s" (or (alist-get 'error rust-viz--trace) "nothing ran"))
       (rust-viz--annotate (1- n))
       (add-hook 'post-command-hook #'rust-viz--follow nil t)
+      (when rust-viz-clear-on-edit
+        (add-hook 'after-change-functions #'rust-viz--clear-on-change nil t))
       (rust-viz--follow (not quiet))
       (if-let* ((err (alist-get 'error rust-viz--trace)))
           (message "rust-viz: stopped — %s" err)

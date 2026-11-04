@@ -109,7 +109,7 @@ Setup: install the binary (`cargo install --path .`), then
 |---|---|---|
 | `C-c C-v r` | `rust-viz-run` | Annotate every executed line with its latest effect (loop lines show `×N`), and open a window below with the stack and heap right after the line at point ran — it follows the cursor. Drag its border to resize; set `rust-viz-detail-window-position` to `right` to split sideways instead. With `rust-viz-mode` on, saving re-annotates too (quietly — it refreshes the window only if it's already open). |
 | `C-c C-v s` | `rust-viz-step` | Step through execution: `n`/`SPC` next, `p`/`DEL` back, `g`/`G` first/last, `q` quit. The current line is highlighted, annotations replay up to that step, and the window below shows the full stack, heap, events and output so far. |
-| `C-c C-v c` | `rust-viz-clear` | Remove annotations. |
+| `C-c C-v c` | `rust-viz-clear` | Remove annotations. They also disappear on their own as soon as you edit the buffer, since they'd be stale (set `rust-viz-clear-on-edit` to `nil` to keep them). |
 
 The buffer's text is piped in, so unsaved edits and bare snippets (no
 `fn main`) work. If the program has an error, it's shown in red on the

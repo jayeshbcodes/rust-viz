@@ -36,6 +36,21 @@
   (should (equal (rust-viz--output-prefix "€😀\n" 7) "€😀"))
   (should (equal (rust-viz--output-prefix "abc" 99) "abc")))
 
+(ert-deftest rust-viz-edit-clears-annotations ()
+  (rust-viz-test--with-sample "ownership.rs"
+    (rust-viz-run)
+    (should (rust-viz-test--annotation 3))
+    (goto-char (point-max))
+    (insert "\n")
+    (should-not (rust-viz-test--annotation 3))
+    ;; Re-running brings them back.
+    (rust-viz-run)
+    (should (rust-viz-test--annotation 3))
+    (let ((rust-viz-clear-on-edit nil))
+      (rust-viz-run)
+      (insert " ")
+      (should (rust-viz-test--annotation 3)))))
+
 (ert-deftest rust-viz-run-annotates-lines ()
   (rust-viz-test--with-sample "ownership.rs"
     (rust-viz-run)
