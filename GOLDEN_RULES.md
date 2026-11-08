@@ -103,6 +103,22 @@ fn main() {
 }
 ```
 
+A borrow used only inside a call is even shorter: it ends when the call
+returns a plain value. `v.contains(&1)` borrows `v`, returns a `bool` that
+points at nothing, and the borrow is over before the `if` body runs, so
+mutating inside is fine. Braces decide when owned values are *dropped*,
+not how long borrows last.
+
+```rust ok
+fn main() {
+    let mut v = vec![1, 2];
+    if v.contains(&1) {
+        v.push(3);
+    }
+    println!("{:?}", v);
+}
+```
+
 ### 6. No dangling references, ever (in safe Rust)
 
 A reference can't outlive what it points at.
