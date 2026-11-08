@@ -390,3 +390,27 @@ fn main() {
 In rust-viz the only heap object is `out`'s buffer; the `to_string()`
 version shows an allocate + free for every character. `encode_utf8`
 returns a `&mut str` that borrows `buf`, so it can't outlive it (rule 6).
+
+### 18. An owned argument that isn't stored is dropped when the function returns
+
+Passing a `String` by value moves it in; if the function doesn't keep it
+(store it, return it), it's freed at the function's end. `HashMap::insert`
+with a key that's already there is the classic case: the map keeps its
+*old* key and updates the value, so the new key you allocated is thrown
+away.
+
+```rust ok
+use std::collections::HashMap;
+fn main() {
+    let mut m = HashMap::new();
+    m.insert(String::from("apple"), 3);
+    let old = m.insert(String::from("apple"), 7);
+    println!("{old:?} {:?}", m.get("apple"));
+}
+```
+
+In rust-viz the second `String::from("apple")` is allocated, moved into
+`insert`, and freed right there. Nothing in the output shows it. To update
+without allocating, borrow with a `&str`: `*m.get_mut("apple").unwrap() += 1`.
+*Java* behaves the same (`put` keeps the old key), but the discarded key
+just becomes garbage for the GC to collect later.
