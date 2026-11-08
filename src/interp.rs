@@ -3138,10 +3138,10 @@ impl Interpreter {
                 self.pending.push(Event::Mutate { name });
                 Ok(Value::Unit)
             }
-            (Got::Val(Value::Vec(id)), "pop" | "remove" | "clear" | "truncate") => {
+            (Got::Val(Value::Vec(id)), "pop" | "remove" | "swap_remove" | "clear" | "truncate") => {
                 let id = *id;
                 self.check_mut_call(&recv)?;
-                let i = if matches!(method, "remove" | "truncate") { Some(self.arg_usize(&args, 0)?) } else { None };
+                let i = if matches!(method, "remove" | "swap_remove" | "truncate") { Some(self.arg_usize(&args, 0)?) } else { None };
                 let HeapObject::Vec { items, .. } = self.heap.get_mut(id)? else { unreachable!() };
                 let len = items.len();
                 let (out, dropped) = match method {
@@ -3152,6 +3152,14 @@ impl Interpreter {
                             return panic_err(format!("removal index (is {i}) should be < len (is {len})"));
                         }
                         (items.remove(i), vec![])
+                    }
+                    // O(1): the last element moves into the gap.
+                    "swap_remove" => {
+                        let i = i.unwrap();
+                        if i >= len {
+                            return panic_err(format!("swap_remove index (is {i}) should be < len (is {len})"));
+                        }
+                        (items.swap_remove(i), vec![])
                     }
                     "truncate" => (Value::Unit, items.split_off(i.unwrap().min(len))),
                     _ => (Value::Unit, std::mem::take(items)),

@@ -176,3 +176,8 @@ fn result_methods_sample_matches_rustc() {
 fn encode_utf8_sample_matches_rustc() {
     assert_matches_rustc("samples/encode_utf8.rs", "encode_utf8");
 }
+
+#[test]
+fn vec_remove_sample_matches_rustc() {
+    assert_matches_rustc("samples/vec_remove.rs", "vec_remove");
+}
