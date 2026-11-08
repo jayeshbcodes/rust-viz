@@ -125,6 +125,11 @@ Reference doesn't specify.
   buffer (no heap) and returns a `&mut str` view of `buf[..n]`
   (`Proj::Utf8` + `Range`); `.as_bytes()` on it is the buffer itself. The
   too-small-buffer panic message matches std's.
+- Borrow-check gap found 2026-11-07: a mutable borrow and a shared read of
+  the same place inside one expression aren't caught. rustc rejects
+  `&mut self.buckets[hash(key, self.buckets.len())]` (E0502: the `&mut`
+  borrow starts before the index is evaluated), rust-viz runs it. Fix:
+  compute the index on its own line first.
 - Found while writing the modules sample: slice patterns (`[a, b, c]` in
   `match`) and `str::parse` aren't supported.
 - `format!`'s initial capacity isn't modeled exactly (we allocate `len`;
