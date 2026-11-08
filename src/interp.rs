@@ -2162,6 +2162,21 @@ impl Interpreter {
 
     // ───────────────────────── heap buffers ────────────────────────
 
+    /// `Default::default()` for the type of `v`, as `mem::take` leaves behind.
+    fn default_of(&mut self, v: &Value) -> R<Value> {
+        Ok(match v {
+            Value::Vec(_) => self.alloc_vec(vec![], 0),
+            Value::Str(_) => self.alloc_str(String::new()),
+            Value::Map(_) => self.map_new(0),
+            Value::Int(_) => Value::Int(0),
+            Value::Float(_) => Value::Float(0.0),
+            Value::Bool(_) => Value::Bool(false),
+            Value::Char(_) => Value::Char('\0'),
+            Value::Enum { ty, .. } if ty == "Option" => option_none(),
+            _ => return Err(self.unsupported(format!("`mem::take` on a `{}` (no Default modeled)", v.type_name()))),
+        })
+    }
+
     fn alloc_str(&mut self, s: String) -> Value {
         let cap = s.len();
         let id = self.heap.alloc(HeapObject::Str { s, cap });
@@ -2703,6 +2718,43 @@ impl Interpreter {
                 self.pending.push(Event::HeapAlloc { id, what: format!("Box holding {desc}") });
                 return Ok(Value::Box(id));
             }
+            // `mem::take` / `replace` / `swap`: move a value out from behind a
+            // `&mut`, leaving a valid one in its place. Nothing is copied:
+            // heap buffers just change owner.
+            "mem::take" | "mem::replace" | "mem::swap" => {
+                let mut args = args.into_iter();
+                let Some(Value::Ref(a, RefKind::Mutable)) = args.next() else {
+                    return compile_err(format!("`{path}` expects a `&mut` reference first (E0308)"));
+                };
+                let out = match path.as_str() {
+                    "mem::swap" => {
+                        let Some(Value::Ref(b, RefKind::Mutable)) = args.next() else {
+                            return compile_err("`mem::swap` expects two `&mut` references (E0308)");
+                        };
+                        let va = std::mem::replace(resolve_mut(&mut self.stack, &mut self.heap, &a)?, Value::Unit);
+                        let vb = std::mem::replace(resolve_mut(&mut self.stack, &mut self.heap, &b)?, va);
+                        *resolve_mut(&mut self.stack, &mut self.heap, &a)? = vb;
+                        self.pending.push(Event::Note(format!("mem::swap: `{}` and `{}` traded values — nothing copied", a.describe(), b.describe())));
+                        self.drop_value(&Value::Ref(b, RefKind::Mutable))?;
+                        Value::Unit
+                    }
+                    _ => {
+                        let new = match args.next() {
+                            Some(v) => v,
+                            None => {
+                                let cur = resolve_mut(&mut self.stack, &mut self.heap, &a)?.clone();
+                                self.default_of(&cur)?
+                            }
+                        };
+                        let old = std::mem::replace(resolve_mut(&mut self.stack, &mut self.heap, &a)?, new);
+                        let what = if path == "mem::take" { "an empty/default value" } else { "the new value" };
+                        self.pending.push(Event::Note(format!("{path}: the old value moves out of `{}`, which now holds {what} — nothing copied", a.describe())));
+                        old
+                    }
+                };
+                self.drop_value(&Value::Ref(a, RefKind::Mutable))?;
+                return Ok(out);
+            }
             "drop" | "mem::drop" => {
                 let v = args.into_iter().next().unwrap_or(Value::Unit);
                 self.pending.push(Event::Note("drop(...) — the value is moved into `drop`, which ends its life right now".into()));
@@ -3183,6 +3235,14 @@ impl Interpreter {
                     "is_ok" => variant == "Ok",
                     _ => variant == "Err",
                 }))
+            }
+            // `opt.take()`: `mem::take` as a method — the value moves out,
+            // `None` is left behind.
+            (Got::Val(Value::Enum { ty, .. }), "take") if ty == "Option" => {
+                self.check_mut_call(&recv)?;
+                let old = std::mem::replace(resolve_mut(&mut self.stack, &mut self.heap, &recv.place)?, option_none());
+                self.pending.push(Event::Mutate { name });
+                Ok(old)
             }
             (Got::Val(Value::Enum { ty, .. }), "copied" | "cloned") if ty == "Option" => {
                 let Value::Enum { fields, .. } = self.read_place(&recv)? else { unreachable!() };

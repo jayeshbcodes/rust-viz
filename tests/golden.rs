@@ -181,3 +181,8 @@ fn encode_utf8_sample_matches_rustc() {
 fn vec_remove_sample_matches_rustc() {
     assert_matches_rustc("samples/vec_remove.rs", "vec_remove");
 }
+
+#[test]
+fn mem_take_sample_matches_rustc() {
+    assert_matches_rustc("samples/mem_take.rs", "mem_take");
+}

@@ -130,6 +130,12 @@ Reference doesn't specify.
   `&mut self.buckets[hash(key, self.buckets.len())]` (E0502: the `&mut`
   borrow starts before the index is evaluated), rust-viz runs it. Fix:
   compute the index on its own line first.
+- `mem::take`/`mem::replace`/`mem::swap` and `Option::take` — added
+  2026-11-08, **verified against rustc** (`samples/mem_take.rs`, which also
+  checks nothing leaks). The value moves out from behind the `&mut`; heap
+  buffers change owner, nothing is copied. `take` leaves the type's default
+  (empty Vec/String/HashMap, 0, false, None); other types are reported as
+  unsupported rather than guessed.
 - Found while writing the modules sample: slice patterns (`[a, b, c]` in
   `match`) and `str::parse` aren't supported.
 - `format!`'s initial capacity isn't modeled exactly (we allocate `len`;
