@@ -414,3 +414,27 @@ In rust-viz the second `String::from("apple")` is allocated, moved into
 without allocating, borrow with a `&str`: `*m.get_mut("apple").unwrap() += 1`.
 *Java* behaves the same (`put` keeps the old key), but the discarded key
 just becomes garbage for the GC to collect later.
+
+### 19. A string literal lives in the binary; `String::from` copies it to the heap
+
+`"apple"` is a `&'static str`: its bytes are baked into the compiled
+program's read-only memory, so using it allocates nothing. Every
+`String::from("apple")` allocates a *new* heap buffer and copies those bytes
+in; two calls give two independent Strings (each owns its buffer and could
+change it). So APIs that only need to *look* take `&str`, and only ones that
+*keep* the text take `String`.
+
+```rust ok
+use std::collections::HashMap;
+fn main() {
+    let mut m: HashMap<String, i32> = HashMap::new();
+    m.insert(String::from("apple"), 1);
+    *m.get_mut("apple").unwrap() += 1;
+    println!("{:?} {}", m.get("apple"), m.contains_key("pear"));
+}
+```
+
+Here only `insert` allocates; `get_mut`, `get` and `contains_key` borrow
+the literals straight from the binary. *Java* keeps literals in its string
+pool much the same way, and `new String("apple")` copies like
+`String::from`, but in Rust the cost is visible in the type.
