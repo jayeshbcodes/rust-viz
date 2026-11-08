@@ -176,6 +176,27 @@ fn main() {
 }
 ```
 
+`mut self` is not `&mut self`: without the `&`, the method takes the
+value by ownership (it's the `self` row, plus permission to change its own
+copy), so the caller's variable is moved and gone after the call. The error
+points at the *caller*, not the signature:
+
+```rust E0382
+struct Counter {
+    n: i32,
+}
+impl Counter {
+    fn bump(mut self) {
+        self.n += 1;
+    }
+}
+fn main() {
+    let c = Counter { n: 0 };
+    c.bump();
+    println!("{}", c.n);
+}
+```
+
 *Java:* any method can change `this`. In Rust the signature alone tells you.
 
 ### 9. Methods that change in place return `()`
