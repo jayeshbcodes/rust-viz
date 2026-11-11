@@ -1252,6 +1252,11 @@ impl Interpreter {
                         p.place.path.push(Proj::Deref);
                         Ok(Some(p))
                     }
+                    // `*s` on a `&str` names a `str`, which has no compile-time
+                    // size: it can only be used behind a pointer.
+                    Got::Val(Value::StaticStr(_)) => compile_err(
+                        "the size for values of type `str` cannot be known at compilation time (E0277) — `*` on a `&str` gives a `str`, which can only live behind a pointer (`&str`, `Box<str>`); use the `&str` itself",
+                    ),
                     Got::Val(v) => compile_err(format!("type `{}` cannot be dereferenced (E0614)", v.type_name())),
                     _ => compile_err("cannot dereference a slice here"),
                 }

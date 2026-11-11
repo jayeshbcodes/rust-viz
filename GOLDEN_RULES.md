@@ -475,3 +475,25 @@ fn main() {
 
 In rust-viz the buffer keeps its `#` number: `old` owns the same heap
 object `v` had, and `v` is left with no heap buffer at all (cap 0).
+
+### 21. Unsized types (`str`, `[T]`, `dyn Trait`) only live behind a pointer
+
+A stack slot needs a size known at compile time. `str`, `[T]` and
+`dyn Trait` have none (`"hi"` is 2 bytes, `"hello"` 5), so you can never
+hold one directly, only through a pointer that carries the missing size:
+`&str` and `&[T]` are *fat pointers* (ptr + len, 16 bytes), `&dyn Trait`
+is ptr + vtable. Every generic `T` silently requires `T: Sized`, so
+generic code like `mem::replace` can't take a bare `str` either;
+`T: ?Sized` opts out, for code that only uses `T` behind a reference.
+
+```rust E0277
+fn main() {
+    let s: &str = "hi";
+    let owned = *s;
+    println!("{}", owned.len());
+}
+```
+
+Use the `&str` itself, or make an owned `String` with `s.to_string()`.
+*Java* never meets this: every object is on the heap behind a reference,
+and all references are the same size.
