@@ -454,3 +454,24 @@ Here only `insert` allocates; `get_mut`, `get` and `contains_key` borrow
 the literals straight from the binary. *Java* keeps literals in its string
 pool much the same way, and `new String("apple")` copies like
 `String::from`, but in Rust the cost is visible in the type.
+
+### 20. A move copies the header, never the heap data
+
+Moving a `Vec` or `String` copies its 24-byte stack header (ptr, len, cap);
+the elements stay exactly where they are on the heap and just get a new
+owner. That's why moving a million-element Vec costs the same as moving an
+empty one. `std::mem::take(&mut v)` uses this: it's
+`mem::replace(&mut v, Default::default())`, which moves the old value out
+(header only) and leaves a valid empty one behind, so you can take
+ownership of something you only have `&mut` access to.
+
+```rust ok
+fn main() {
+    let mut v = vec![1, 2, 3];
+    let old = std::mem::take(&mut v);
+    println!("{:?} {:?} {}", old, v, v.capacity());
+}
+```
+
+In rust-viz the buffer keeps its `#` number: `old` owns the same heap
+object `v` had, and `v` is left with no heap buffer at all (cap 0).
