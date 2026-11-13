@@ -540,3 +540,29 @@ its bounds against the concrete types, and generates a copy per type
 (`class MyMap<K extends Comparable<K>, V>`) and erases generics at runtime,
 so it can't have methods that exist only for some type arguments.
 rust-viz doesn't check impl bounds before a call; rustc does.
+
+### 23. A signature is a contract: `&` only reads, `&mut` may change, `T` takes it, and bounds list what's allowed
+
+What a function can do to its inputs is written in its signature and
+enforced by the compiler, not by convention: through a `&T` it cannot
+change the value, `&mut T` may change it (and the caller had to write
+`&mut` too), an owned `T` is moved in. Trait bounds list the only
+operations it may use on a generic input: `fn f<Q: Hash>(key: &Q)` can
+hash `key` and nothing else. So the signature alone tells you what a call
+can do. (Not tracked: printing, files, globals, and types built for
+changes behind `&`, like `RefCell`.)
+
+```rust E0596
+fn total(v: &Vec<i32>) -> i32 {
+    v.push(0);
+    v.iter().sum()
+}
+fn main() {
+    let v = vec![1, 2, 3];
+    println!("{}", total(&v));
+}
+```
+
+*Java's* `final List<T> list` only stops reassigning the variable;
+`list.add(..)` still works, so read-only access comes from conventions
+(`Collections.unmodifiableList`, immutable classes) rather than the type.
