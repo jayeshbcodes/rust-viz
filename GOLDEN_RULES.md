@@ -588,3 +588,30 @@ fn main() {
 is only `PartialEq` (`NaN != NaN`), which is why it can't be a `HashMap`
 key. *Java* is the other way round: `==` on objects compares addresses and
 `.equals()` compares contents, a classic bug that Rust's `==` can't make.
+
+### 25. `Borrow` points from the owner to its view: `K: Borrow<Q>` is `String → str`
+
+`impl Borrow<str> for String` reads "a String can be *viewed as* a str".
+The trait sits on the owner and names the view. A view can only drop
+information (a `String` is ptr+len+cap, a `str` is just the bytes), so the
+reverse, `str → String`, isn't a view at all: it would need a new
+allocation. That's why a map's lookup converts its *stored* keys,
+`k.borrow() == key` (`&String → &str`, then `&str == &str`), and never the
+caller's key, which already arrives as `&str`. The trait also promises the
+view hashes and compares exactly like the owner, which is what lets
+`HashMap<String, _>` take `get("apple")` without allocating.
+
+```rust ok
+use std::borrow::Borrow;
+use std::collections::HashMap;
+fn main() {
+    let owned = String::from("apple");
+    let view: &str = owned.borrow();
+    let mut m: HashMap<String, i32> = HashMap::new();
+    m.insert(owned.clone(), 3);
+    println!("{view} {:?}", m.get("apple"));
+}
+```
+
+Memory hook: owner → view, never view → owner; `.borrow()` is called on
+what the map *owns*.
