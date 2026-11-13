@@ -2760,6 +2760,17 @@ impl Interpreter {
                 self.drop_value(&Value::Ref(a, RefKind::Mutable))?;
                 return Ok(out);
             }
+            // Address comparison: do both references point at the very same
+            // place? (`==` on references compares the values instead.)
+            "ptr::eq" => {
+                let (Some(Value::Ref(a, ka)), Some(Value::Ref(b, kb))) = (args.first().cloned(), args.get(1).cloned()) else {
+                    return Err(self.unsupported("`ptr::eq` on anything but two references"));
+                };
+                let same = a.frame == b.frame && a.slot == b.slot && a.path == b.path;
+                self.drop_value(&Value::Ref(a, ka))?;
+                self.drop_value(&Value::Ref(b, kb))?;
+                return Ok(Value::Bool(same));
+            }
             "drop" | "mem::drop" => {
                 let v = args.into_iter().next().unwrap_or(Value::Unit);
                 self.pending.push(Event::Note("drop(...) — the value is moved into `drop`, which ends its life right now".into()));

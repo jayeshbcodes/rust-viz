@@ -186,3 +186,8 @@ fn vec_remove_sample_matches_rustc() {
 fn mem_take_sample_matches_rustc() {
     assert_matches_rustc("samples/mem_take.rs", "mem_take");
 }
+
+#[test]
+fn ref_eq_sample_matches_rustc() {
+    assert_matches_rustc("samples/ref_eq.rs", "ref_eq");
+}

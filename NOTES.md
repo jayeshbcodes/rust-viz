@@ -141,6 +141,9 @@ Reference doesn't specify.
   body actually needs `Display` (then E0277), where rustc rejects the call
   itself (E0599). Values carry no static type arguments, so a `MyMap<K, V>`
   with no entries gives no way to know `K`.
+- `std::ptr::eq` on two references — added 2026-11-13, **verified against
+  rustc** (`samples/ref_eq.rs`): true when both point at the same place
+  (frame, slot, projection path).
 - Found while writing the modules sample: slice patterns (`[a, b, c]` in
   `match`) and `str::parse` aren't supported.
 - `format!`'s initial capacity isn't modeled exactly (we allocate `len`;

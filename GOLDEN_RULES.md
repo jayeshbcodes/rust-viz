@@ -566,3 +566,25 @@ fn main() {
 *Java's* `final List<T> list` only stops reassigning the variable;
 `list.add(..)` still works, so read-only access comes from conventions
 (`Collections.unmodifiableList`, immutable classes) rather than the type.
+
+### 24. `==` on references compares the values, never the addresses
+
+`a == b` is `PartialEq::eq(&a, &b)`, and for references std's impl follows
+them and compares what they point to. So two `&String`s holding the same
+text are equal even though they point at different buffers, and a
+`&String` equals a `&str` literal in the binary. To ask "do these point
+at the very same place?", say so: `std::ptr::eq(a, b)`.
+
+```rust ok
+fn main() {
+    let a = String::from("apple");
+    let b = String::from("apple");
+    let (ra, rb) = (&a, &b);
+    println!("{} {} {}", ra == rb, ra == "apple", std::ptr::eq(ra, rb));
+}
+```
+
+`Eq` is `PartialEq` plus a promise that every value equals itself; `f64`
+is only `PartialEq` (`NaN != NaN`), which is why it can't be a `HashMap`
+key. *Java* is the other way round: `==` on objects compares addresses and
+`.equals()` compares contents, a classic bug that Rust's `==` can't make.
