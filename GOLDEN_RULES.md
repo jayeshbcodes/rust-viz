@@ -615,3 +615,30 @@ fn main() {
 
 Memory hook: owner → view, never view → owner; `.borrow()` is called on
 what the map *owns*.
+
+### 26. **Monomorphization**: a generic function becomes one copy per type you use
+
+The compiler stamps out a separate, specialized copy of generic code for
+every concrete type it's called with. `bucket_of::<str>` and
+`bucket_of::<i32>` are two functions in the binary, each calling its
+type's `hash` *directly*, chosen at compile time (static dispatch). Generic
+code is therefore exactly as fast as hand-written per-type code. The costs
+are a bigger binary and longer compile times. It's also why bounds are
+checked per concrete type, and why a method can exist only for some type
+arguments (rule 22).
+
+```rust ok
+use std::fmt::Display;
+fn describe<T: Display>(x: T) -> String {
+    format!("<{x}>")
+}
+fn main() {
+    println!("{} {} {}", describe(42), describe("hi"), describe(1.5));
+}
+```
+
+Three copies of `describe` exist after compiling: for `i32`, `&str`, `f64`.
+*Java* does the opposite, **type erasure**: one compiled copy where `T`
+becomes `Object`, and `x.toString()` is picked at runtime by a virtual
+call (runtime polymorphism). Rust has that too, opt-in, with `dyn Trait`
+(Rust Book ch. 17): one copy plus a vtable lookup.
