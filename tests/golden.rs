@@ -191,3 +191,8 @@ fn mem_take_sample_matches_rustc() {
 fn ref_eq_sample_matches_rustc() {
     assert_matches_rustc("samples/ref_eq.rs", "ref_eq");
 }
+
+#[test]
+fn hashing_sample_matches_rustc() {
+    assert_matches_rustc("samples/hashing.rs", "hashing");
+}

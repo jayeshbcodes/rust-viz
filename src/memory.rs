@@ -637,6 +637,7 @@ impl fmt::Debug for DebugView<'_> {
             Value::Char(c) => fmt::Debug::fmt(c, f),
             Value::Unit => f.write_str("()"),
             Value::Formatter(_) => f.write_str("Formatter"),
+            Value::Hasher(_) => f.write_str("DefaultHasher"),
             Value::Closure { .. } => f.write_str("<closure>"),
             Value::FnItem(n) => f.write_str(n),
             Value::Iter(n) => match &**n {
@@ -719,6 +720,7 @@ pub fn describe_value(stack: &Stack, heap: &Heap, v: &Value) -> String {
         },
         Value::StaticStr(s) => format!("&str {s:?}  (static: lives in the binary, not the heap)"),
         Value::Formatter(_) => "&mut Formatter (collects the text `write!` produces)".into(),
+        Value::Hasher(_) => "DefaultHasher (SipHash-1-3 state, on the stack — no heap)".into(),
         Value::FnItem(n) => format!("fn {n} (a function used as a value — zero bytes, nothing captured)"),
         Value::Iter(n) => format!("{}  (iterator state, stored on the stack — lazy until driven)", n.describe()),
         Value::Closure { captures, modes, kind, .. } => {

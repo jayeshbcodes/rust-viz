@@ -298,3 +298,34 @@ fn main() {
     assert_eq!(interp.output, "6 6 [\"a\"] [\"a\", \"bc\"]\n");
     assert_eq!(interp.steps.last().unwrap().heap.live_count(), 0);
 }
+
+#[test]
+fn hashing_a_float_or_underived_struct() {
+    let src = r#"
+use std::collections::hash_map::DefaultHasher;
+use std::hash::{Hash, Hasher};
+fn main() {
+    let mut h = DefaultHasher::new();
+    1.5.hash(&mut h);
+}
+"#;
+    let e = err_of(src);
+    assert!(e.contains("E0277") && e.contains("Hash"), "{e}");
+    let src = r#"
+use std::collections::hash_map::DefaultHasher;
+use std::hash::{Hash, Hasher};
+struct P { x: i32 }
+fn main() {
+    let mut h = DefaultHasher::new();
+    P { x: 1 }.hash(&mut h);
+}
+"#;
+    let e = err_of(src);
+    assert!(e.contains("E0277") && e.contains("`P: Hash`"), "{e}");
+}
+
+#[test]
+fn bare_str_by_value_is_unsized() {
+    let e = err_of("fn main() { let s: &str = \"hi\"; let owned = *s; }");
+    assert!(e.contains("E0277") && e.contains("str"), "{e}");
+}

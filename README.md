@@ -72,7 +72,7 @@ format specs, hand-written `impl Display`/`impl Debug` with `write!`, the
 `split_whitespace` → `map`/`filter`/`zip`/`enumerate`/`take`/`skip`/`rev`/… →
 `collect`/`sum`/`fold`/`find`/`any`/…), and `HashMap` (`insert`/`get`/
 `entry().or_insert()`/`remove`/iteration/`map[&k]`, with its real table
-growth), and inline modules (`mod x { ... }` with `pub`, `use`,
+growth), `DefaultHasher`/`#[derive(Hash)]` with rustc's exact hashes, and inline modules (`mod x { ... }` with `pub`, `use`,
 `crate::`/`self::`/`super::` paths, and E0603 privacy errors).
 
 It does **not** support `HashSet`/`BTreeMap`, `Rc`/`RefCell`, user-defined

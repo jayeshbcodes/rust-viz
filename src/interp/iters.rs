@@ -582,7 +582,7 @@ impl Interpreter {
                 let end = self.eval_int(e)?;
                 if matches!(r.limits, RangeLimits::Closed(_)) { end + 1 } else { end }
             }
-            None => i64::MAX,
+            None => i128::MAX,
         };
         Ok(Value::Iter(Box::new(IterNode::Range { front: start, back })))
     }
@@ -724,7 +724,7 @@ impl Interpreter {
             IterNode::Enumerate(inner, n) => match self.iter_next(inner, line)? {
                 Some(x) => {
                     *n += 1;
-                    Some(Value::Tuple(vec![Value::Int(*n as i64 - 1), x]))
+                    Some(Value::Tuple(vec![Value::Int(*n as i128 - 1), x]))
                 }
                 None => None,
             },
@@ -822,7 +822,7 @@ impl Interpreter {
         self.check_step_budget()?;
         Ok(match node {
             IterNode::Range { front, back } => {
-                if *back == i64::MAX {
+                if *back == i128::MAX {
                     return compile_err("an unbounded range (`a..`) can't be reversed (E0277)");
                 }
                 if front < back {
@@ -881,7 +881,7 @@ impl Interpreter {
             },
             IterNode::Enumerate(inner, n) => {
                 let remaining = size_hint(inner).0;
-                self.iter_next_back(inner, line)?.map(|x| Value::Tuple(vec![Value::Int((*n + remaining - 1) as i64), x]))
+                self.iter_next_back(inner, line)?.map(|x| Value::Tuple(vec![Value::Int((*n + remaining - 1) as i128), x]))
             }
             IterNode::Cloned(inner) => match self.iter_next_back(inner, line)? {
                 Some(x) => {
@@ -995,7 +995,7 @@ impl Interpreter {
                         IterNode::Chars { chars, front: 0, back: n, borrow }
                     }
                     "bytes" => {
-                        let items: Vec<Value> = text.bytes().map(|b| Value::Int(b as i64)).collect();
+                        let items: Vec<Value> = text.bytes().map(|b| Value::Int(b as i128)).collect();
                         let n = items.len();
                         IterNode::Owned { items, front: 0, back: n, buffer: None, borrow }
                     }
@@ -1255,7 +1255,7 @@ impl Interpreter {
         }
         if method == "len" {
             let Got::Val(Value::Iter(node)) = self.got(&recv.place)? else { unreachable!() };
-            return Ok(Value::Int(size_hint(&node).0 as i64));
+            return Ok(Value::Int(size_hint(&node).0 as i128));
         }
         let adaptor = |f: fn(Box<IterNode>, Box<Value>) -> IterNode, this: &mut Self, args: Vec<Value>| -> R<Value> {
             let node = this.take_iter(recv)?;
@@ -1616,10 +1616,10 @@ fn split_ranges(t: &str, pat: &str) -> Vec<(usize, usize)> {
 
 /// `Iterator::size_hint`, per std's implementations.
 pub(super) fn size_hint(n: &IterNode) -> (usize, Option<usize>) {
-    let sat = |x: i64| x.max(0) as usize;
+    let sat = |x: i128| x.max(0) as usize;
     match n {
         IterNode::Range { front, back } => {
-            if *back == i64::MAX { (usize::MAX, None) } else { (sat(back - front), Some(sat(back - front))) }
+            if *back == i128::MAX { (usize::MAX, None) } else { (sat(back - front), Some(sat(back - front))) }
         }
         IterNode::Slice { front, back, .. } | IterNode::Owned { front, back, .. } => (back - front, Some(back - front)),
         IterNode::Chars { chars, front, back, .. } => {
@@ -1667,7 +1667,7 @@ pub(super) fn size_hint(n: &IterNode) -> (usize, Option<usize>) {
 /// front), which lets `collect` allocate exactly once.
 fn trusted_len(n: &IterNode) -> bool {
     match n {
-        IterNode::Range { back, .. } => *back != i64::MAX,
+        IterNode::Range { back, .. } => *back != i128::MAX,
         IterNode::Slice { .. } | IterNode::Owned { .. } => true,
         IterNode::Map(i, _) | IterNode::Enumerate(i, _) | IterNode::Cloned(i) | IterNode::Copied(i) | IterNode::Rev(i) | IterNode::Take(i, _) => trusted_len(i),
         IterNode::Zip(a, b) | IterNode::Chain(a, b) => trusted_len(a) && trusted_len(b),

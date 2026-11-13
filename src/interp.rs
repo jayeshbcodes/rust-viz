@@ -128,6 +128,7 @@ struct Derives {
     copy: bool,
     clone: bool,
     debug: bool,
+    hash: bool,
 }
 
 struct StructDef {
@@ -186,7 +187,7 @@ enum Got {
 }
 
 enum IterSrc {
-    Ints(Vec<i64>),
+    Ints(Vec<i128>),
     Chars(Vec<char>),
     /// Owned values moved out of a consumed `Vec` (`buffer` gets freed
     /// when the loop ends) or array.
@@ -260,6 +261,9 @@ pub struct Interpreter {
     /// Dropping a value whose borrows already ended early (NLL): free its
     /// heap data but don't end those borrows a second time.
     keep_refs: bool,
+    /// Real hasher state for each `DefaultHasher::new()`, indexed by
+    /// `Value::Hasher`.
+    hashers: Vec<std::hash::DefaultHasher>,
     /// Closure definitions, indexed by `Value::Closure::id`.
     closures: Vec<Rc<iters::ClosureDef>>,
     /// Target type for the next `.collect()` (from `let v: Vec<_> = ...`).
@@ -308,6 +312,7 @@ impl Interpreter {
             fmt_bufs: Vec::new(),
             keep_refs: false,
             closures: Vec::new(),
+            hashers: Vec::new(),
             collect_hint: None,
             chunk_wrapped: false,
         }
@@ -799,7 +804,7 @@ impl Interpreter {
                         }
                     }
                 }
-                Value::Formatter(_) | Value::FnItem(_) => {}
+                Value::Formatter(_) | Value::FnItem(_) | Value::Hasher(_) => {}
                 _ => {
                     let prev = std::mem::replace(&mut self.keep_refs, expired);
                     let r = self.drop_value_except(&value, &moved_paths, &mut Vec::new());
@@ -1252,11 +1257,10 @@ impl Interpreter {
                         p.place.path.push(Proj::Deref);
                         Ok(Some(p))
                     }
-                    // `*s` on a `&str` names a `str`, which has no compile-time
-                    // size: it can only be used behind a pointer.
-                    Got::Val(Value::StaticStr(_)) => compile_err(
-                        "the size for values of type `str` cannot be known at compilation time (E0277) — `*` on a `&str` gives a `str`, which can only live behind a pointer (`&str`, `Box<str>`); use the `&str` itself",
-                    ),
+                    // `*s` on a `&str` names the `str` itself: fine to compare or
+                    // re-borrow (`*a == *b`, `&*s`); binding it by value is
+                    // rejected in `exec_local`.
+                    Got::Val(Value::StaticStr(_)) => Ok(Some(inner)),
                     Got::Val(v) => compile_err(format!("type `{}` cannot be dereferenced (E0614)", v.type_name())),
                     _ => compile_err("cannot dereference a slice here"),
                 }
@@ -1295,8 +1299,8 @@ impl Interpreter {
             Resolved::Val(v) => Got::Val(v.clone()),
             Resolved::Str(s) => Got::Str(s.to_string()),
             Resolved::Slice(items) => Got::Slice(items.to_vec()),
-            Resolved::Bytes(b) => Got::Slice(b.iter().map(|x| Value::Int(*x as i64)).collect()),
-            Resolved::Byte(b) => Got::Val(Value::Int(b as i64)),
+            Resolved::Bytes(b) => Got::Slice(b.iter().map(|x| Value::Int(*x as i128)).collect()),
+            Resolved::Byte(b) => Got::Val(Value::Int(b as i128)),
         })
     }
 
@@ -1592,6 +1596,15 @@ impl Interpreter {
                     let value = self.eval_expr(&init.expr);
                     self.collect_hint = None;
                     let value = value?;
+                    // `let owned = *s;` with `s: &str`: a bare `str` has no
+                    // compile-time size, so it can't be a variable.
+                    if let (Value::StaticStr(_), Expr::Unary(u)) = (&value, &*init.expr)
+                        && matches!(u.op, UnOp::Deref(_))
+                    {
+                        return compile_err(
+                            "the size for values of type `str` cannot be known at compilation time (E0277) — `*` on a `&str` gives a `str`, which can only live behind a pointer (`&str`, `Box<str>`); use the `&str` itself",
+                        );
+                    }
                     if let (Value::Vec(id), Some(t)) = (&value, strip_type(&local.pat).1)
                         && is_byte_vec_type(&t.to_token_stream().to_string())
                     {
@@ -1801,12 +1814,12 @@ impl Interpreter {
 
     fn eval_lit(&mut self, lit: &Lit) -> R<Value> {
         Ok(match lit {
-            Lit::Int(i) => Value::Int(i.base10_parse::<i64>().map_err(|e| InterpError::Parse(e.to_string()))?),
+            Lit::Int(i) => Value::Int(i.base10_parse::<i128>().map_err(|e| InterpError::Parse(e.to_string()))?),
             Lit::Float(f) => Value::Float(f.base10_parse::<f64>().map_err(|e| InterpError::Parse(e.to_string()))?),
             Lit::Bool(b) => Value::Bool(b.value),
             Lit::Str(s) => Value::StaticStr(s.value()),
             Lit::Char(c) => Value::Char(c.value()),
-            Lit::Byte(b) => Value::Int(b.value() as i64),
+            Lit::Byte(b) => Value::Int(b.value() as i128),
             _ => return Err(self.unsupported("this kind of literal")),
         })
     }
@@ -1863,16 +1876,17 @@ impl Interpreter {
                     };
                 }
                 let v = match (ty.as_str(), c.as_str()) {
-                    ("i8", "MAX") => i8::MAX as i64,
-                    ("i8", "MIN") => i8::MIN as i64,
-                    ("u8", "MAX") => u8::MAX as i64,
-                    ("i16", "MAX") => i16::MAX as i64,
-                    ("u16", "MAX") => u16::MAX as i64,
-                    ("i32", "MAX") => i32::MAX as i64,
-                    ("i32", "MIN") => i32::MIN as i64,
-                    ("u32", "MAX") => u32::MAX as i64,
-                    ("i64" | "isize", "MAX") => i64::MAX,
-                    ("i64" | "isize", "MIN") => i64::MIN,
+                    ("i8", "MAX") => i8::MAX as i128,
+                    ("i8", "MIN") => i8::MIN as i128,
+                    ("u8", "MAX") => u8::MAX as i128,
+                    ("i16", "MAX") => i16::MAX as i128,
+                    ("u16", "MAX") => u16::MAX as i128,
+                    ("i32", "MAX") => i32::MAX as i128,
+                    ("i32", "MIN") => i32::MIN as i128,
+                    ("u32", "MAX") => u32::MAX as i128,
+                    ("i64" | "isize", "MAX") => i64::MAX as i128,
+                    ("i64" | "isize", "MIN") => i64::MIN as i128,
+                    ("u64" | "usize", "MAX") => u64::MAX as i128,
                     ("u8" | "u16" | "u32" | "u64" | "usize", "MIN") => 0,
                     _ => return Err(self.unsupported(format!("the path `{ty}::{c}`"))),
                 };
@@ -1986,11 +2000,19 @@ impl Interpreter {
         }
         let l = self.deref_val(l)?;
         let r = self.deref_val(r)?;
+        // Integers carry no width at runtime, so a result only overflows
+        // when no 64-bit Rust integer could hold it: below `i64::MIN` or
+        // above `u64::MAX` (which `DefaultHasher::finish` can reach).
         let overflow = |what: &str| panic_err(format!("attempt to {what} with overflow"));
+        let fits = |v: i128| (i64::MIN as i128..=u64::MAX as i128).contains(&v);
+        let checked = |v: Option<i128>, what: &str| match v {
+            Some(v) if fits(v) => Ok(v),
+            _ => overflow(what),
+        };
         Ok(match (op, &l, &r) {
-            (Add(_), Value::Int(a), Value::Int(b)) => Value::Int(a.checked_add(*b).map_or_else(|| overflow("add"), Ok)?),
-            (Sub(_), Value::Int(a), Value::Int(b)) => Value::Int(a.checked_sub(*b).map_or_else(|| overflow("subtract"), Ok)?),
-            (Mul(_), Value::Int(a), Value::Int(b)) => Value::Int(a.checked_mul(*b).map_or_else(|| overflow("multiply"), Ok)?),
+            (Add(_), Value::Int(a), Value::Int(b)) => Value::Int(checked(a.checked_add(*b), "add")?),
+            (Sub(_), Value::Int(a), Value::Int(b)) => Value::Int(checked(a.checked_sub(*b), "subtract")?),
+            (Mul(_), Value::Int(a), Value::Int(b)) => Value::Int(checked(a.checked_mul(*b), "multiply")?),
             (Div(_), Value::Int(_), Value::Int(0)) => return panic_err("attempt to divide by zero"),
             (Rem(_), Value::Int(_), Value::Int(0)) => return panic_err("attempt to calculate the remainder with a divisor of zero"),
             (Div(_), Value::Int(a), Value::Int(b)) => Value::Int(a / b),
@@ -2771,6 +2793,11 @@ impl Interpreter {
                 self.drop_value(&Value::Ref(b, kb))?;
                 return Ok(Value::Bool(same));
             }
+            "DefaultHasher::new" | "DefaultHasher::default" | "hash_map::DefaultHasher::new" | "hash::DefaultHasher::new" => {
+                self.hashers.push(std::hash::DefaultHasher::new());
+                self.pending.push(Event::Note("DefaultHasher::new() — SipHash-1-3 state on the stack, no heap; same fixed keys every run".into()));
+                return Ok(Value::Hasher(self.hashers.len() - 1));
+            }
             "drop" | "mem::drop" => {
                 let v = args.into_iter().next().unwrap_or(Value::Unit);
                 self.pending.push(Event::Note("drop(...) — the value is moved into `drop`, which ends its life right now".into()));
@@ -3016,12 +3043,12 @@ impl Interpreter {
             (_, "len") | (_, "is_empty") => {
                 read(self)?;
                 let n = self.len_of(&recv.place)?;
-                Ok(if method == "len" { Value::Int(n as i64) } else { Value::Bool(n == 0) })
+                Ok(if method == "len" { Value::Int(n as i128) } else { Value::Bool(n == 0) })
             }
             (Got::Val(Value::Vec(id) | Value::Str(id)), "capacity") => {
                 read(self)?;
                 Ok(Value::Int(match self.heap.get(*id)? {
-                    HeapObject::Vec { cap, .. } | HeapObject::Str { cap, .. } => *cap as i64,
+                    HeapObject::Vec { cap, .. } | HeapObject::Str { cap, .. } => *cap as i128,
                     _ => 0,
                 }))
             }
@@ -3041,6 +3068,41 @@ impl Interpreter {
                     _ => unreachable!(),
                 };
                 Ok(self.alloc_str(t))
+            }
+            // `key.hash(&mut hasher)`: feed the key into the real SipHash
+            // state, exactly as its std `Hash` impl would.
+            (_, "hash") if matches!(args.first(), Some(Value::Ref(_, RefKind::Mutable))) => {
+                let Some(Value::Ref(hp, _)) = args.first() else { unreachable!() };
+                let Ok(Resolved::Val(Value::Hasher(i))) = resolve(&self.stack, &self.heap, hp) else {
+                    return Err(self.unsupported("`.hash(..)` into anything but a `DefaultHasher`"));
+                };
+                let i = *i;
+                let hasher_name = hp.describe();
+                read(self)?;
+                let mut h = self.hashers[i].clone();
+                // A view of a string's bytes hashes as `[u8]`, one byte each.
+                let bytes = match resolve(&self.stack, &self.heap, &recv.place) {
+                    Ok(Resolved::Bytes(b)) => Some(b.to_vec()),
+                    _ => None,
+                };
+                match &got {
+                    _ if bytes.is_some() => std::hash::Hash::hash(bytes.as_deref().unwrap(), &mut h),
+                    Got::Str(s) => std::hash::Hash::hash(s.as_str(), &mut h),
+                    Got::Slice(items) => {
+                        std::hash::Hasher::write_usize(&mut h, items.len());
+                        for x in items {
+                            self.feed_hash(x, &mut h)?;
+                        }
+                    }
+                    Got::Val(v) => self.feed_hash(v, &mut h)?,
+                }
+                self.hashers[i] = h;
+                self.pending.push(Event::Mutate { name: hasher_name });
+                Ok(Value::Unit)
+            }
+            (Got::Val(Value::Hasher(i)), "finish") => {
+                read(self)?;
+                Ok(Value::Int(std::hash::Hasher::finish(&self.hashers[*i]) as i128))
             }
             (Got::Val(Value::Formatter(i)), "write_str") => {
                 let i = *i;
@@ -3309,7 +3371,7 @@ impl Interpreter {
                     return panic_err(format!("encode_utf8: need {n} bytes to encode U+{:X}, but the buffer has {have}", c as u32));
                 }
                 for (slot, b) in items.iter_mut().zip(&tmp[..n]) {
-                    *slot = Value::Int(*b as i64);
+                    *slot = Value::Int(*b as i128);
                 }
                 self.pending.push(Event::Mutate { name: buf.describe() });
                 self.pending.push(Event::Note(format!("`{c:?}` encoded as {n} UTF-8 byte(s) into `{}` — on the stack, no heap allocation", buf.describe())));
@@ -3332,10 +3394,10 @@ impl Interpreter {
                     "is_ascii" => Value::Bool(c.is_ascii()),
                     "to_ascii_uppercase" => Value::Char(c.to_ascii_uppercase()),
                     "to_ascii_lowercase" => Value::Char(c.to_ascii_lowercase()),
-                    "len_utf8" => Value::Int(c.len_utf8() as i64),
+                    "len_utf8" => Value::Int(c.len_utf8() as i128),
                     "to_digit" => {
                         let radix = self.arg_usize(&args, 0)? as u32;
-                        c.to_digit(radix).map(|d| Value::Int(d as i64)).map_or_else(option_none, option_some)
+                        c.to_digit(radix).map(|d| Value::Int(d as i128)).map_or_else(option_none, option_some)
                     }
                     _ => return no_method("char"),
                 })
@@ -3346,7 +3408,10 @@ impl Interpreter {
                 let a = || args.first().cloned().unwrap_or(Value::Unit);
                 Ok(Value::Int(match (method, self.deref_val(a())?) {
                     ("abs", _) => i.abs(),
-                    ("pow", Value::Int(e)) => i.checked_pow(e as u32).map_or_else(|| panic_err("attempt to multiply with overflow"), Ok)?,
+                    ("pow", Value::Int(e)) => match i.checked_pow(e as u32) {
+                        Some(v) if (i64::MIN as i128..=u64::MAX as i128).contains(&v) => v,
+                        _ => return panic_err("attempt to multiply with overflow"),
+                    },
                     ("min", Value::Int(b)) => i.min(b),
                     ("max", Value::Int(b)) => i.max(b),
                     _ => return no_method("integer"),
@@ -3383,6 +3448,100 @@ impl Interpreter {
             },
             _ => vec![],
         })
+    }
+
+    /// Feeds `v` into `h` the way its std `Hash` impl does, so the result
+    /// matches rustc. Integers carry no width at runtime: they hash as
+    /// `i32` (Rust's default integer type) when they fit, else `i64`/`u64`.
+    fn feed_hash(&self, v: &Value, h: &mut std::hash::DefaultHasher) -> R<()> {
+        use std::hash::{Hash, Hasher};
+        let not_hash = |ty: &str| compile_err(format!("the trait bound `{ty}: Hash` is not satisfied (E0277)"));
+        match v {
+            Value::Int(n) => {
+                if let Ok(x) = i32::try_from(*n) {
+                    x.hash(h)
+                } else if let Ok(x) = i64::try_from(*n) {
+                    x.hash(h)
+                } else {
+                    (*n as u64).hash(h)
+                }
+            }
+            Value::Bool(b) => b.hash(h),
+            Value::Char(c) => c.hash(h),
+            Value::Unit => {} // `()` hashes as nothing
+            Value::StaticStr(s) => s.as_str().hash(h),
+            Value::Str(id) => match self.heap.get(*id)? {
+                HeapObject::Str { s, .. } => s.as_str().hash(h),
+                _ => return not_hash("String"),
+            },
+            Value::Box(id) => match self.heap.get(*id)? {
+                HeapObject::Box(inner) => self.feed_hash(&inner.clone(), h)?,
+                _ => return not_hash("Box"),
+            },
+            Value::Ref(p, _) => match resolve(&self.stack, &self.heap, p)? {
+                Resolved::Val(v) => self.feed_hash(&v.clone(), h)?,
+                Resolved::Str(s) => (*s).hash(h),
+                Resolved::Bytes(b) => b.hash(h),
+                Resolved::Byte(b) => b.hash(h),
+                Resolved::Slice(items) => {
+                    let items = items.to_vec();
+                    h.write_usize(items.len());
+                    for x in &items {
+                        self.feed_hash(x, h)?;
+                    }
+                }
+            },
+            Value::Tuple(items) => {
+                for x in items {
+                    self.feed_hash(x, h)?;
+                }
+            }
+            // `[T; N]` and `Vec<T>` hash as a slice: length, then elements.
+            Value::Array(items) => {
+                h.write_usize(items.len());
+                for x in items {
+                    self.feed_hash(x, h)?;
+                }
+            }
+            Value::Vec(id) => {
+                let items = match self.heap.get(*id)? {
+                    HeapObject::Vec { items, .. } => items.clone(),
+                    _ => vec![],
+                };
+                h.write_usize(items.len());
+                for x in &items {
+                    self.feed_hash(x, h)?;
+                }
+            }
+            Value::Struct { ty, fields, .. } => {
+                if !self.structs.get(ty).is_some_and(|d| d.derives.hash) {
+                    return not_hash(ty);
+                }
+                for (_, x) in fields {
+                    self.feed_hash(x, h)?;
+                }
+            }
+            // `#[derive(Hash)]` on an enum hashes the variant's index (as
+            // `isize`, when there's more than one variant), then its fields.
+            Value::Enum { ty, variant, fields, .. } => {
+                let (index, count) = match ty.as_str() {
+                    "Option" => (usize::from(variant == "Some"), 2),
+                    "Result" => (usize::from(variant == "Err"), 2),
+                    _ => match self.enums.get(ty) {
+                        Some(d) if d.derives.hash => (d.variants.iter().position(|(n, ..)| n == variant).unwrap_or(0), d.variants.len()),
+                        _ => return not_hash(ty),
+                    },
+                };
+                if count > 1 {
+                    (index as isize).hash(h);
+                }
+                for (_, x) in fields {
+                    self.feed_hash(x, h)?;
+                }
+            }
+            v => return not_hash(&v.type_name()),
+        }
+        Ok(())
     }
 
     /// The elements of a `Vec<u8>`/`[u8]` as bytes.
@@ -3644,7 +3803,7 @@ impl Interpreter {
                     }
                 };
                 consumed = i + 1;
-                let item = if enumerate { Value::Tuple(vec![Value::Int(i as i64), item]) } else { item };
+                let item = if enumerate { Value::Tuple(vec![Value::Int(i as i128), item]) } else { item };
                 let shown = debug_value(&self.stack, &self.heap, &item, false);
                 let of = n.map(|n| format!(" of {n}")).unwrap_or_default();
                 self.pending.push(Event::Note(format!("for: iteration {}{of} — `{pat_text}` = {shown}", i + 1)));
@@ -3807,7 +3966,7 @@ impl Interpreter {
         Ok((IterSrc::Refs { base, indices: (0..len).collect(), kind }, false))
     }
 
-    fn eval_int(&mut self, e: &Expr) -> R<i64> {
+    fn eval_int(&mut self, e: &Expr) -> R<i128> {
         let v = self.eval_expr(e)?;
         match self.take_val(v)? {
             Value::Int(i) => Ok(i),
@@ -4166,26 +4325,28 @@ fn cast(v: Value, ty: &str) -> R<Value> {
     let int_ty = matches!(ty, "i8" | "i16" | "i32" | "i64" | "i128" | "isize" | "u8" | "u16" | "u32" | "u64" | "u128" | "usize");
     Ok(match (v, ty) {
         (Value::Int(i), t) if int_ty => Value::Int(match t {
-            "u8" => i as u8 as i64,
-            "i8" => i as i8 as i64,
-            "u16" => i as u16 as i64,
-            "i16" => i as i16 as i64,
-            "u32" => i as u32 as i64,
-            "i32" => i as i32 as i64,
+            "u8" => i as u8 as i128,
+            "i8" => i as i8 as i128,
+            "u16" => i as u16 as i128,
+            "i16" => i as i16 as i128,
+            "u32" => i as u32 as i128,
+            "i32" => i as i32 as i128,
+            "u64" | "usize" => i as u64 as i128,
+            "i64" | "isize" => i as i64 as i128,
             _ => i,
         }),
         (Value::Int(i), "f64" | "f32") => Value::Float(i as f64),
-        (Value::Float(x), _) if int_ty => Value::Int(x as i64),
+        (Value::Float(x), _) if int_ty => Value::Int(x as i128),
         (Value::Float(x), "f64" | "f32") => Value::Float(x),
-        (Value::Char(c), _) if int_ty => Value::Int(c as i64),
-        (Value::Bool(b), _) if int_ty => Value::Int(b as i64),
+        (Value::Char(c), _) if int_ty => Value::Int(c as i128),
+        (Value::Bool(b), _) if int_ty => Value::Int(b as i128),
         (Value::Int(i), "char") if (0..=255).contains(&i) => Value::Char(i as u8 as char),
         (v, t) => return compile_err(format!("non-primitive cast: `{}` as `{t}` (E0605)", v.type_name())),
     })
 }
 
 fn derives_of(attrs: &[syn::Attribute]) -> Derives {
-    let mut d = Derives { copy: false, clone: false, debug: false };
+    let mut d = Derives { copy: false, clone: false, debug: false, hash: false };
     for a in attrs {
         if a.path().is_ident("derive") {
             let _ = a.parse_nested_meta(|m| {
@@ -4193,6 +4354,7 @@ fn derives_of(attrs: &[syn::Attribute]) -> Derives {
                     Some("Copy") => d.copy = true,
                     Some("Clone") => d.clone = true,
                     Some("Debug") => d.debug = true,
+                    Some("Hash") => d.hash = true,
                     _ => {}
                 }
                 Ok(())
@@ -4349,10 +4511,10 @@ fn result_err(e: Value) -> Value {
 /// `Utf8Error { valid_up_to, error_len }`, as std's `Debug` shows it.
 fn utf8_error(e: &std::str::Utf8Error) -> Value {
     let error_len = match e.error_len() {
-        Some(n) => Value::Enum { ty: "Option".into(), variant: "Some".into(), fields: vec![("0".into(), Value::Int(n as i64))], copy: true },
+        Some(n) => Value::Enum { ty: "Option".into(), variant: "Some".into(), fields: vec![("0".into(), Value::Int(n as i128))], copy: true },
         None => option_none(),
     };
-    let fields = vec![("valid_up_to".into(), Value::Int(e.valid_up_to() as i64)), ("error_len".into(), error_len)];
+    let fields = vec![("valid_up_to".into(), Value::Int(e.valid_up_to() as i128)), ("error_len".into(), error_len)];
     Value::Struct { ty: "Utf8Error".into(), fields, copy: true }
 }
 

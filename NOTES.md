@@ -78,8 +78,11 @@ Reference doesn't specify.
 
 ## Open items
 
-- Integers are all `i64` at runtime: no `i32`/`u8` overflow panics, and no
-  type checking of mismatched integer widths.
+- Integers are one runtime type (`i128` since 2026-11-13, so a full `u64`
+  such as `DefaultHasher::finish()` fits): no `i32`/`u8` overflow panics,
+  and no type checking of mismatched integer widths. Arithmetic panics with
+  "attempt to … with overflow" only outside `i64::MIN..=u64::MAX`. `as`
+  casts to `u8`/`i8`/…/`u64`/`i64` wrap like rustc.
 - ~~`impl Display for T` isn't supported~~ — done 2026-10-25: `{}`/`{:?}`
   on a type with a hand-written `impl Display`/`impl Debug` calls its
   `fmt` as a real call (own frame, `self` borrowing the actual variable);
@@ -144,6 +147,17 @@ Reference doesn't specify.
 - `std::ptr::eq` on two references — added 2026-11-13, **verified against
   rustc** (`samples/ref_eq.rs`): true when both point at the same place
   (frame, slot, projection path).
+- `DefaultHasher` / `Hash` / `finish` — added 2026-11-13, **verified
+  against rustc** (`samples/hashing.rs`: str, String, ints, char, bool,
+  tuples, arrays, Vec, slices, byte slices, Option, Result, Box, derived
+  structs and enums all give rustc's exact `u64`). `Value::Hasher` indexes
+  real `std::hash::DefaultHasher` state that `feed_hash` feeds exactly as
+  each std `Hash` impl does (slices: length prefix then elements; derived
+  enums: variant index as `isize` when there's more than one variant).
+  Approximation: integers have no width at runtime, so they hash as `i32`
+  when they fit (Rust's default), else `i64`/`u64`; a `u8`/`usize` key
+  gives a different hash than rustc. Hand-written `impl Hash` and custom
+  `Hasher`s aren't supported.
 - Found while writing the modules sample: slice patterns (`[a, b, c]` in
   `match`) and `str::parse` aren't supported.
 - `format!`'s initial capacity isn't modeled exactly (we allocate `len`;

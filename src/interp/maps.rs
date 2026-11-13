@@ -169,7 +169,7 @@ impl Interpreter {
             "capacity" => {
                 read(self)?;
                 match self.heap.get(id)? {
-                    HeapObject::Map { buckets, .. } => Value::Int(map_capacity(*buckets) as i64),
+                    HeapObject::Map { buckets, .. } => Value::Int(map_capacity(*buckets) as i128),
                     _ => Value::Int(0),
                 }
             }

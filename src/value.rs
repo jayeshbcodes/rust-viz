@@ -11,7 +11,7 @@ pub type HeapId = usize;
 /// same as real Rust. See `NOTES.md` for the fidelity ledger.
 #[derive(Debug, Clone, PartialEq)]
 pub enum Value {
-    Int(i64),
+    Int(i128),
     Float(f64),
     Bool(bool),
     Char(char),
@@ -53,6 +53,9 @@ pub enum Value {
     /// the output buffer `write!(f, ..)` appends to. Not real memory the
     /// program owns; it's std's, so it never moves or drops.
     Formatter(usize),
+    /// A `std::hash::DefaultHasher` — index into `Interpreter::hashers`,
+    /// which holds the real SipHash state, so hashes match rustc.
+    Hasher(usize),
     /// A closure: its captured variables stored inline, like a struct's
     /// fields (that's what a real closure is — an anonymous struct). Each
     /// capture is a reference (`&`/`&mut` borrow of the outer variable) or
@@ -88,7 +91,7 @@ pub enum ClosureKind {
 #[derive(Debug, Clone, PartialEq)]
 pub enum IterNode {
     /// `a..b` (half-open; `a..=b` is stored as `a..b+1`).
-    Range { front: i64, back: i64 },
+    Range { front: i128, back: i128 },
     /// `.iter()` / `.iter_mut()`: yields `&base[i]` / `&mut base[i]`.
     Slice { base: Place, borrow: Box<Value>, front: usize, back: usize, kind: RefKind },
     /// Owned items: `vec.into_iter()` (owns the Vec's `buffer`), an array's
@@ -234,7 +237,7 @@ impl Value {
             // `[T; N]`/tuples are `Copy` exactly when every element is.
             Value::Array(items) | Value::Tuple(items) => items.iter().all(Value::is_copy),
             Value::Struct { copy, .. } | Value::Enum { copy, .. } => *copy,
-            Value::Vec(_) | Value::Str(_) | Value::Box(_) | Value::Map(_) => false,
+            Value::Vec(_) | Value::Str(_) | Value::Box(_) | Value::Map(_) | Value::Hasher(_) => false,
         }
     }
 
@@ -257,6 +260,7 @@ impl Value {
             Value::Ref(_, RefKind::Shared) => "&".into(),
             Value::Ref(_, RefKind::Mutable) => "&mut".into(),
             Value::Formatter(_) => "&mut Formatter".into(),
+            Value::Hasher(_) => "DefaultHasher".into(),
             Value::Closure { .. } => "closure".into(),
             Value::FnItem(n) => format!("fn {n}"),
             Value::Iter(n) => n.describe(),
