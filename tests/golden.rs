@@ -206,3 +206,8 @@ fn slice_patterns_sample_matches_rustc() {
 fn parse_sample_matches_rustc() {
     assert_matches_rustc("samples/parse.rs", "parse");
 }
+
+#[test]
+fn borrow_lookup_sample_matches_rustc() {
+    assert_matches_rustc("samples/borrow_lookup.rs", "borrow_lookup");
+}

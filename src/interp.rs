@@ -3168,12 +3168,15 @@ impl Interpreter {
                 let t = display_value(&self.stack, &self.heap, v);
                 Ok(self.alloc_str(t))
             }
-            (Got::Val(Value::Str(_)), "as_str") | (Got::Val(Value::Vec(_)), "as_slice") => {
+            // `Borrow::borrow`: a `String` borrows as `&str` and a `Vec` as a
+            // slice (a view, no copy); anything else as `&` itself.
+            (Got::Val(Value::Str(_) | Value::Vec(_)), "borrow") | (Got::Val(Value::Str(_)), "as_str") | (Got::Val(Value::Vec(_)), "as_slice") => {
                 let len = self.len_of(&recv.place)?;
                 let mut p = recv;
                 push_proj(&mut p.place, Proj::Range(0, len));
                 self.borrow_place(p, false)
             }
+            (_, "borrow") if args.is_empty() => self.borrow_place(recv, false),
             // `s.parse::<T>()`: the target type comes from the turbofish or
             // a `let x: T` annotation; Rust's own parser decides the result.
             (Got::Val(Value::Str(_) | Value::StaticStr(_)) | Got::Str(_), "parse") => {
