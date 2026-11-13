@@ -136,6 +136,11 @@ Reference doesn't specify.
   buffers change owner, nothing is copied. `take` leaves the type's default
   (empty Vec/String/HashMap, 0, false, None); other types are reported as
   unsupported rather than guessed.
+- Trait bounds on impls aren't checked before a call (2026-11-13): calling a
+  method of `impl<T: Display> Pair<T>` on a `Pair<Secret>` runs until the
+  body actually needs `Display` (then E0277), where rustc rejects the call
+  itself (E0599). Values carry no static type arguments, so a `MyMap<K, V>`
+  with no entries gives no way to know `K`.
 - Found while writing the modules sample: slice patterns (`[a, b, c]` in
   `match`) and `str::parse` aren't supported.
 - `format!`'s initial capacity isn't modeled exactly (we allocate `len`;

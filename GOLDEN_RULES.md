@@ -497,3 +497,46 @@ fn main() {
 Use the `&str` itself, or make an owned `String` with `s.to_string()`.
 *Java* never meets this: every object is on the heap behind a reference,
 and all references are the same size.
+
+### 22. Put trait bounds on impls, not structs; a method exists only where its bounds hold
+
+`impl<K: Hash + Eq, V> MyMap<K, V>` declares `K` and `V`, requires
+`K: Hash + Eq`, and adds methods to `MyMap<K, V>`. Keep the struct itself
+unbounded: a bound on the struct must be repeated on every impl and every
+function that mentions the type, even ones that never use it. Instead,
+split methods into impl blocks by what they need. Calling a method whose
+impl bounds your types don't meet is a compile error (E0599 "the method
+exists ... but its trait bounds were not satisfied").
+
+```rust ok
+use std::fmt::Display;
+struct Pair<T> {
+    a: T,
+    b: T,
+}
+impl<T> Pair<T> {
+    fn new(a: T, b: T) -> Self {
+        Pair { a, b }
+    }
+}
+impl<T: Display> Pair<T> {
+    fn show(&self) {
+        println!("({}, {})", self.a, self.b);
+    }
+}
+fn main() {
+    let p = Pair::new(1, 2);
+    p.show();
+    let names = Pair::new("x", "y");
+    names.show();
+}
+```
+
+A `Pair<Secret>` (no `Display`) can still be built with `new`, but has no
+`show`. The real `HashMap` does this: `len` needs nothing, `insert` needs
+`K: Eq + Hash`. The compiler picks the one impl defining the method, checks
+its bounds against the concrete types, and generates a copy per type
+(monomorphization). *Java* puts bounds on the class
+(`class MyMap<K extends Comparable<K>, V>`) and erases generics at runtime,
+so it can't have methods that exist only for some type arguments.
+rust-viz doesn't check impl bounds before a call; rustc does.
