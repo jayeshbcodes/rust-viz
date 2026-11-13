@@ -329,3 +329,38 @@ fn bare_str_by_value_is_unsized() {
     let e = err_of("fn main() { let s: &str = \"hi\"; let owned = *s; }");
     assert!(e.contains("E0277") && e.contains("str"), "{e}");
 }
+
+#[test]
+fn mut_index_reading_the_same_vec() {
+    // `&mut self.buckets[hash(key, self.buckets.len())]`: the `&mut` borrow
+    // of the Vec starts before the index (which reads it again) runs.
+    let src = r#"
+struct M { buckets: Vec<Vec<i32>> }
+fn pick(n: usize) -> usize { n - 1 }
+impl M {
+    fn bump(&mut self) {
+        for x in &mut self.buckets[pick(self.buckets.len())] {
+            *x += 1;
+        }
+    }
+}
+fn main() { let mut m = M { buckets: vec![vec![1]] }; m.bump(); }
+"#;
+    let e = err_of(src);
+    assert!(e.contains("E0502") && e.contains("self.buckets"), "{e}");
+    // Computing the index first is fine, and so are arrays and push(len).
+    let ok = r#"
+fn main() {
+    let mut v = vec![1, 2, 3];
+    let i = v.len() - 1;
+    v[i] += 1;
+    v.push(v.len());
+    let mut a = [1, 2, 3];
+    a[a.len() - 1] = 9;
+    println!("{:?} {:?}", v, a);
+}
+"#;
+    let (interp, result) = Interpreter::run_program(ok);
+    result.unwrap();
+    assert_eq!(interp.output, "[1, 2, 4, 3] [1, 2, 9]\n");
+}

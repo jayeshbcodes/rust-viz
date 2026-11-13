@@ -128,36 +128,12 @@ Reference doesn't specify.
   buffer (no heap) and returns a `&mut str` view of `buf[..n]`
   (`Proj::Utf8` + `Range`); `.as_bytes()` on it is the buffer itself. The
   too-small-buffer panic message matches std's.
-- Borrow-check gap found 2026-11-07: a mutable borrow and a shared read of
-  the same place inside one expression aren't caught. rustc rejects
-  `&mut self.buckets[hash(key, self.buckets.len())]` (E0502: the `&mut`
-  borrow starts before the index is evaluated), rust-viz runs it. Fix:
-  compute the index on its own line first.
-- `mem::take`/`mem::replace`/`mem::swap` and `Option::take` — added
-  2026-11-08, **verified against rustc** (`samples/mem_take.rs`, which also
-  checks nothing leaks). The value moves out from behind the `&mut`; heap
-  buffers change owner, nothing is copied. `take` leaves the type's default
-  (empty Vec/String/HashMap, 0, false, None); other types are reported as
-  unsupported rather than guessed.
-- Trait bounds on impls aren't checked before a call (2026-11-13): calling a
-  method of `impl<T: Display> Pair<T>` on a `Pair<Secret>` runs until the
-  body actually needs `Display` (then E0277), where rustc rejects the call
-  itself (E0599). Values carry no static type arguments, so a `MyMap<K, V>`
-  with no entries gives no way to know `K`.
-- `std::ptr::eq` on two references — added 2026-11-13, **verified against
-  rustc** (`samples/ref_eq.rs`): true when both point at the same place
-  (frame, slot, projection path).
-- `DefaultHasher` / `Hash` / `finish` — added 2026-11-13, **verified
-  against rustc** (`samples/hashing.rs`: str, String, ints, char, bool,
-  tuples, arrays, Vec, slices, byte slices, Option, Result, Box, derived
-  structs and enums all give rustc's exact `u64`). `Value::Hasher` indexes
-  real `std::hash::DefaultHasher` state that `feed_hash` feeds exactly as
-  each std `Hash` impl does (slices: length prefix then elements; derived
-  enums: variant index as `isize` when there's more than one variant).
-  Approximation: integers have no width at runtime, so they hash as `i32`
-  when they fit (Rust's default), else `i64`/`u64`; a `u8`/`usize` key
-  gives a different hash than rustc. Hand-written `impl Hash` and custom
-  `Hasher`s aren't supported.
+- ~~Borrow-check gap: `&mut` + read in one expression~~ — fixed
+  2026-11-13. `&mut v[..]`, `v[..] = x`, `v[..] += x` and `for x in &mut
+  v[..]` are E0502 when `v` is a `Vec` and the index expression mentions
+  `v` again (syntactic token match), since the `IndexMut` borrow starts
+  before the index runs. Arrays and `v.push(v.len())` (two-phase borrow)
+  stay allowed, as in rustc.
 - Found while writing the modules sample: slice patterns (`[a, b, c]` in
   `match`) and `str::parse` aren't supported.
 - `format!`'s initial capacity isn't modeled exactly (we allocate `len`;

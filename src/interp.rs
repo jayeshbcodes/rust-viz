@@ -1713,6 +1713,9 @@ impl Interpreter {
                 self.read_place(&p)
             }
             Expr::Reference(r) => {
+                if r.mutability.is_some() {
+                    self.check_index_mut_reads_base(&r.expr)?;
+                }
                 let p = self.place_or_temp(&r.expr)?;
                 // Slicing a `&'static str` just narrows a pointer into the
                 // binary's read-only data — still `&'static str`, borrowing
@@ -2105,6 +2108,7 @@ impl Interpreter {
             self.drop_value(&v)?;
             return Ok(Value::Unit);
         }
+        self.check_index_mut_reads_base(&a.left)?;
         let val = self.eval_expr(&a.right)?;
         let Some(p) = self.eval_place(&a.left)? else {
             return compile_err("invalid left-hand side of assignment (E0070)");
@@ -2148,8 +2152,32 @@ impl Interpreter {
         Ok(Value::Unit)
     }
 
+    /// E0502 for `v[..]` used mutably (`&mut v[i]`, `v[i] = x`, `v[i] += x`)
+    /// when the index reads `v` again. For a `Vec` that's an `IndexMut`
+    /// call: the `&mut v` starts before the index is evaluated, so reading
+    /// `v` inside it conflicts. Built-in array indexing evaluates the index
+    /// first, so arrays are fine (as is `v.push(v.len())`: two-phase borrow).
+    fn check_index_mut_reads_base(&mut self, e: &Expr) -> R<()> {
+        let Expr::Index(ix) = e else { return Ok(()) };
+        let base = flat_tokens(ix.expr.to_token_stream());
+        let index = flat_tokens(ix.index.to_token_stream());
+        if base.is_empty() || !index.windows(base.len()).any(|w| w == base.as_slice()) {
+            return Ok(());
+        }
+        let Some(bp) = self.eval_place(&ix.expr)? else { return Ok(()) };
+        if !matches!(self.got(&bp.place)?, Got::Val(Value::Vec(_))) {
+            return Ok(());
+        }
+        let b = ix.expr.to_token_stream().to_string().replace(" . ", ".");
+        let i = self.source_text(&ix.index).unwrap_or_else(|| ix.index.to_token_stream().to_string());
+        compile_err(format!(
+            "cannot borrow `{b}` as immutable because it is also borrowed as mutable (E0502) — using `{b}[..]` mutably borrows `{b}` before the index `{i}` is evaluated, and the index reads `{b}` again; compute the index first: `let i = {i};`"
+        ))
+    }
+
     fn eval_compound_assign(&mut self, b: &syn::ExprBinary) -> R<Value> {
         use BinOp::*;
+        self.check_index_mut_reads_base(&b.left)?;
         let rhs = self.eval_expr(&b.right)?;
         let Some(p) = self.eval_place(&b.left)? else {
             return compile_err("invalid left-hand side of assignment (E0067)");
@@ -3926,6 +3954,9 @@ impl Interpreter {
                 }
             },
             Expr::Reference(r) => {
+                if r.mutability.is_some() {
+                    self.check_index_mut_reads_base(&r.expr)?;
+                }
                 let base = self.place_or_temp(&r.expr)?;
                 let base = self.auto_deref(base)?;
                 let kind = if r.mutability.is_some() { RefKind::Mutable } else { RefKind::Shared };
@@ -4491,6 +4522,18 @@ pub fn is_ready_to_feed(buffer: &str) -> bool {
     // ready too.
     let trimmed = buffer.trim_end();
     trimmed.ends_with(';') || trimmed.ends_with('}')
+}
+
+/// Every token in `ts`, with groups (`(..)`, `[..]`) flattened, as text.
+fn flat_tokens(ts: TokenStream) -> Vec<String> {
+    let mut out = Vec::new();
+    for t in ts {
+        match t {
+            TokenTree::Group(g) => out.extend(flat_tokens(g.stream())),
+            t => out.push(t.to_string()),
+        }
+    }
+    out
 }
 
 /// `Vec<u8>` and other 1-byte element types (tokens as `syn` prints them).
