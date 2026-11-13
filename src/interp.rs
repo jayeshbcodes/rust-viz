@@ -268,6 +268,8 @@ pub struct Interpreter {
     closures: Vec<Rc<iters::ClosureDef>>,
     /// Target type for the next `.collect()` (from `let v: Vec<_> = ...`).
     collect_hint: Option<String>,
+    /// The `::<T>` of the method call being evaluated (`s.parse::<i32>()`).
+    turbofish: Option<String>,
     /// Source came in through `feed` (wrapped as `{chunk}`), not a file.
     chunk_wrapped: bool,
 }
@@ -314,6 +316,7 @@ impl Interpreter {
             closures: Vec::new(),
             hashers: Vec::new(),
             collect_hint: None,
+            turbofish: None,
             chunk_wrapped: false,
         }
     }
@@ -2559,6 +2562,11 @@ impl Interpreter {
         if let Some(text) = self.user_fmt(v, trait_name)? {
             return Ok(text);
         }
+        if !spec.is_debug()
+            && let Some(text) = self.std_error_text(&self.deref_val(v.clone())?)
+        {
+            return Ok(pad(text, spec, false));
+        }
         if spec.is_debug() {
             self.check_debug(v)?;
             let s = debug_value(&self.stack, &self.heap, v, spec.alt);
@@ -3029,7 +3037,7 @@ impl Interpreter {
         if let Some(v) = self.map_method(&method, &recv, &got, &m.args, line)? {
             return Ok(v);
         }
-        if let Some(v) = self.iter_method(&method, &recv, &got, &m.args, turbofish, line)? {
+        if let Some(v) = self.iter_method(&method, &recv, &got, &m.args, turbofish.clone(), line)? {
             return Ok(v);
         }
         let mut args = Vec::new();
@@ -3043,7 +3051,10 @@ impl Interpreter {
         } else {
             args.iter().filter(|a| matches!(a, Value::Ref(..))).cloned().collect()
         };
-        let out = self.builtin_method(&method, recv, got, args)?;
+        self.turbofish = turbofish;
+        let out = self.builtin_method(&method, recv, got, args);
+        self.turbofish = None;
+        let out = out?;
         for a in &borrowed {
             self.drop_value(a)?;
         }
@@ -3141,6 +3152,10 @@ impl Interpreter {
                 self.fmt_bufs[i].push_str(&text);
                 Ok(result_ok())
             }
+            (Got::Val(v @ (Value::Struct { .. } | Value::Enum { .. })), "to_string") if self.std_error_text(v).is_some() => {
+                let text = self.std_error_text(v).unwrap_or_default();
+                Ok(self.alloc_str(text))
+            }
             (Got::Val(v @ (Value::Struct { .. } | Value::Enum { .. })), "to_string") => {
                 let ty = v.type_name();
                 let v = Value::Ref(Place { reborrow: true, ..recv.place.clone() }, RefKind::Shared);
@@ -3158,6 +3173,21 @@ impl Interpreter {
                 let mut p = recv;
                 push_proj(&mut p.place, Proj::Range(0, len));
                 self.borrow_place(p, false)
+            }
+            // `s.parse::<T>()`: the target type comes from the turbofish or
+            // a `let x: T` annotation; Rust's own parser decides the result.
+            (Got::Val(Value::Str(_) | Value::StaticStr(_)) | Got::Str(_), "parse") => {
+                read(self)?;
+                let text = match &got {
+                    Got::Str(s) => s.clone(),
+                    Got::Val(v) => self.text_of(v)?.unwrap_or_default(),
+                    Got::Slice(_) => unreachable!(),
+                };
+                let hint = self.turbofish.clone().or_else(|| self.collect_hint.clone()).unwrap_or_default();
+                let Some(ty) = hint.split(|c: char| !c.is_alphanumeric()).find(|t| PARSE_TYPES.contains(t)) else {
+                    return compile_err("type annotations needed — say what to parse into: `s.parse::<i32>()` or `let n: i32 = s.parse().unwrap();` (E0284)");
+                };
+                Ok(self.parse_str(&text, ty))
             }
             (Got::Val(Value::Str(_) | Value::StaticStr(_)) | Got::Str(_), "to_uppercase" | "to_lowercase" | "trim" | "contains" | "starts_with" | "ends_with") => {
                 read(self)?;
@@ -3570,6 +3600,87 @@ impl Interpreter {
             v => return not_hash(&v.type_name()),
         }
         Ok(())
+    }
+
+    /// `text.parse::<ty>()`, with std's own result and error kinds.
+    fn parse_str(&mut self, text: &str, ty: &str) -> Value {
+        fn kind(ty: &str, variant: String) -> Value {
+            Value::Enum { ty: ty.into(), variant, fields: vec![], copy: true }
+        }
+        fn error(ty: &str, fields: Vec<(String, Value)>) -> Value {
+            result_err(Value::Struct { ty: ty.into(), fields, copy: false })
+        }
+        let int = |r: Result<i128, std::num::ParseIntError>| match r {
+            Ok(v) => result_ok_with(Value::Int(v)),
+            Err(e) => error("ParseIntError", vec![("kind".into(), kind("IntErrorKind", format!("{:?}", e.kind())))]),
+        };
+        match ty {
+            "i8" => int(text.parse::<i8>().map(i128::from)),
+            "u8" => int(text.parse::<u8>().map(i128::from)),
+            "i16" => int(text.parse::<i16>().map(i128::from)),
+            "u16" => int(text.parse::<u16>().map(i128::from)),
+            "i32" => int(text.parse::<i32>().map(i128::from)),
+            "u32" => int(text.parse::<u32>().map(i128::from)),
+            "i64" => int(text.parse::<i64>().map(i128::from)),
+            "u64" => int(text.parse::<u64>().map(i128::from)),
+            "isize" => int(text.parse::<isize>().map(|v| v as i128)),
+            "usize" => int(text.parse::<usize>().map(|v| v as i128)),
+            "i128" => int(text.parse::<i128>()),
+            "u128" => int(text.parse::<u128>().map(|v| v as i128)),
+            "f64" | "f32" => {
+                let r = if ty == "f32" { text.parse::<f32>().map(f64::from) } else { text.parse::<f64>() };
+                match r {
+                    Ok(v) => result_ok_with(Value::Float(v)),
+                    Err(_) => {
+                        let k = if text.is_empty() { "Empty" } else { "Invalid" };
+                        error("ParseFloatError", vec![("kind".into(), kind("FloatErrorKind", k.into()))])
+                    }
+                }
+            }
+            "bool" => match text.parse::<bool>() {
+                Ok(b) => result_ok_with(Value::Bool(b)),
+                Err(_) => error("ParseBoolError", vec![]),
+            },
+            "char" => match text.parse::<char>() {
+                Ok(c) => result_ok_with(Value::Char(c)),
+                Err(_) => {
+                    let k = if text.is_empty() { "EmptyString" } else { "TooManyChars" };
+                    error("ParseCharError", vec![("kind".into(), kind("CharErrorKind", k.into()))])
+                }
+            },
+            _ => {
+                let s = self.alloc_str(text.to_string());
+                result_ok_with(s)
+            }
+        }
+    }
+
+    /// `Display` text for std's parse errors (`{e}`, `e.to_string()`).
+    fn std_error_text(&self, v: &Value) -> Option<String> {
+        let Value::Struct { ty, fields, .. } = v else { return None };
+        if self.structs.contains_key(ty) {
+            return None; // a user type that happens to share the name
+        }
+        let kind = match fields.first() {
+            Some((_, Value::Enum { variant, .. })) => variant.as_str(),
+            _ => "",
+        };
+        Some(
+            match (ty.as_str(), kind) {
+                ("ParseIntError", "Empty") => "cannot parse integer from empty string",
+                ("ParseIntError", "InvalidDigit") => "invalid digit found in string",
+                ("ParseIntError", "PosOverflow") => "number too large to fit in target type",
+                ("ParseIntError", "NegOverflow") => "number too small to fit in target type",
+                ("ParseIntError", _) => "number would be zero for non-zero type",
+                ("ParseFloatError", "Empty") => "cannot parse float from empty string",
+                ("ParseFloatError", _) => "invalid float literal",
+                ("ParseBoolError", _) => "provided string was not `true` or `false`",
+                ("ParseCharError", "EmptyString") => "cannot parse char from empty string",
+                ("ParseCharError", _) => "too many characters in string",
+                _ => return None,
+            }
+            .to_string(),
+        )
     }
 
     /// The elements of a `Vec<u8>`/`[u8]` as bytes.
@@ -4173,6 +4284,50 @@ impl Interpreter {
                 }
                 Ok(false)
             }
+            // `[first, second]`, `[head, ..]`, `[first, rest @ ..]` on an
+            // array or slice (a `&Vec` coerces to `&[T]`).
+            Pat::Slice(sl) => {
+                let n = match &got {
+                    Got::Slice(items) | Got::Val(Value::Array(items)) => items.len(),
+                    Got::Val(Value::Vec(id)) => match self.heap.get(*id)? {
+                        HeapObject::Vec { items, .. } => items.len(),
+                        _ => return Ok(false),
+                    },
+                    _ => return Ok(false),
+                };
+                let is_rest = |p: &Pat| match p {
+                    Pat::Rest(_) => true,
+                    Pat::Ident(i) => matches!(i.subpat.as_ref().map(|(_, sp)| &**sp), Some(Pat::Rest(_))),
+                    _ => false,
+                };
+                let elems: Vec<&Pat> = sl.elems.iter().collect();
+                let rest = elems.iter().position(|p| is_rest(p));
+                let fixed = elems.len() - usize::from(rest.is_some());
+                if (rest.is_none() && n != fixed) || n < fixed {
+                    return Ok(false);
+                }
+                let after = rest.map_or(0, |r| elems.len() - r - 1);
+                for (i, p) in elems.iter().enumerate() {
+                    let mut next = subject.clone();
+                    if Some(i) == rest {
+                        if matches!(p, Pat::Rest(_)) {
+                            continue;
+                        }
+                        // `rest @ ..` binds the middle as a sub-slice.
+                        push_proj(&mut next.place, Proj::Range(i, n - after));
+                    } else {
+                        let idx = match rest {
+                            Some(r) if i > r => n - (elems.len() - i),
+                            _ => i,
+                        };
+                        push_proj(&mut next.place, Proj::Index(idx));
+                    }
+                    if !self.match_pat(p, &next, default_ref, out)? {
+                        return Ok(false);
+                    }
+                }
+                Ok(true)
+            }
             Pat::Tuple(t) => {
                 let Got::Val(Value::Tuple(items)) = &got else { return Ok(false) };
                 let n = items.len();
@@ -4535,6 +4690,9 @@ fn flat_tokens(ts: TokenStream) -> Vec<String> {
     }
     out
 }
+
+/// Types `str::parse` is modeled for.
+const PARSE_TYPES: [&str; 17] = ["i8", "u8", "i16", "u16", "i32", "u32", "i64", "u64", "isize", "usize", "i128", "u128", "f32", "f64", "bool", "char", "String"];
 
 /// `Vec<u8>` and other 1-byte element types (tokens as `syn` prints them).
 fn is_byte_vec_type(t: &str) -> bool {

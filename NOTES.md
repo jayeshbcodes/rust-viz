@@ -134,8 +134,13 @@ Reference doesn't specify.
   `v` again (syntactic token match), since the `IndexMut` borrow starts
   before the index runs. Arrays and `v.push(v.len())` (two-phase borrow)
   stay allowed, as in rustc.
-- Found while writing the modules sample: slice patterns (`[a, b, c]` in
-  `match`) and `str::parse` aren't supported.
+- ~~Slice patterns and `str::parse` unsupported~~ — added 2026-11-13,
+  **verified against rustc** (`samples/slice_patterns.rs`,
+  `samples/parse.rs`). Slice patterns: exact length, `..`, `rest @ ..`
+  (a sub-slice view), on arrays, slices and `&Vec`. `parse` takes its
+  target type from the turbofish or a `let x: T` annotation (else E0284),
+  uses std's own parser, and returns std's error values
+  (`ParseIntError { kind: .. }` etc.) with their exact Display messages.
 - `format!`'s initial capacity isn't modeled exactly (we allocate `len`;
   real `format!` uses an estimate) — don't trust its `.capacity()`.
 - No per-binding type tracking: reassigning a variable to a value of a

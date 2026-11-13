@@ -196,3 +196,13 @@ fn ref_eq_sample_matches_rustc() {
 fn hashing_sample_matches_rustc() {
     assert_matches_rustc("samples/hashing.rs", "hashing");
 }
+
+#[test]
+fn slice_patterns_sample_matches_rustc() {
+    assert_matches_rustc("samples/slice_patterns.rs", "slice_patterns");
+}
+
+#[test]
+fn parse_sample_matches_rustc() {
+    assert_matches_rustc("samples/parse.rs", "parse");
+}

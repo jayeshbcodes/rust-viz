@@ -76,8 +76,8 @@ growth), `DefaultHasher`/`#[derive(Hash)]` with rustc's exact hashes, and inline
 `crate::`/`self::`/`super::` paths, and E0603 privacy errors).
 
 It does **not** support `HashSet`/`BTreeMap`, `Rc`/`RefCell`, user-defined
-iterators (`impl Iterator`), modules in other files (`mod x;`), slice
-patterns (`[a, b, ..]`), `str::parse`, or external crates yet. Anything unsupported stops with a clear "rust-viz doesn't
+iterators (`impl Iterator`), modules in other files (`mod x;`), or external
+crates yet. Anything unsupported stops with a clear "rust-viz doesn't
 support X yet (line N)" message instead of guessing. Because the
 interpreter is dynamically typed, it doesn't type-check: all integers
 behave like `i64`.

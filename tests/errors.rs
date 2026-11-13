@@ -364,3 +364,9 @@ fn main() {
     result.unwrap();
     assert_eq!(interp.output, "[1, 2, 4, 3] [1, 2, 9]\n");
 }
+
+#[test]
+fn parse_without_a_target_type() {
+    let e = err_of("fn main() { let x = \"5\".parse().unwrap(); }");
+    assert!(e.contains("E0284") && e.contains("parse::<i32>"), "{e}");
+}
