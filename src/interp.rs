@@ -531,6 +531,9 @@ impl Interpreter {
                 let tr = imp.trait_.as_ref().and_then(|(p, _)| p.segments.last()).map(|s| s.ident.to_string());
                 for it in &imp.items {
                     if let syn::ImplItem::Fn(f) = it {
+                        if tr.is_some() && !matches!(f.vis, syn::Visibility::Inherited) {
+                            return compile_err(format!("visibility qualifiers are not permitted on `{}`: trait items always share the visibility of their trait (E0449)", f.sig.ident));
+                        }
                         let name = format!("{ty}::{}", f.sig.ident);
                         let def = Rc::new(FnDef { name: name.clone(), sig: f.sig.clone(), block: f.block.clone(), self_ty: Some(ty.clone()), module: self.cur_mod().to_vec(), line_base: self.line_offset });
                         // `impl Display` and `impl Debug` both define `fmt`,

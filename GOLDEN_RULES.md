@@ -642,3 +642,41 @@ Three copies of `describe` exist after compiling: for `i32`, `&str`, `f64`.
 becomes `Object`, and `x.toString()` is picked at runtime by a virtual
 call (runtime polymorphism). Rust has that too, opt-in, with `dyn Trait`
 (Rust Book ch. 17): one copy plus a vtable lookup.
+
+### 27. A trait impl's methods take the trait's visibility: no `pub` there
+
+In an inherent impl (`impl MyStr { ... }`) you choose `pub` or private per
+method. In a trait impl (`impl Display for MyStr { ... }`) you don't: the
+methods are exactly as visible as the trait, so `fmt` is callable anywhere
+that sees `Display` and `MyStr`. Writing `pub fn fmt` is an error.
+
+```rust ok
+mod shapes {
+    use std::fmt;
+    pub struct P;
+    impl fmt::Display for P {
+        fn fmt(&self, f: &mut fmt::Formatter) -> fmt::Result {
+            write!(f, "P")
+        }
+    }
+}
+fn main() {
+    println!("{}", shapes::P); // no `pub` on fmt, yet callable outside `shapes`
+}
+```
+
+```rust E0449
+use std::fmt;
+struct P;
+impl fmt::Display for P {
+    pub fn fmt(&self, f: &mut fmt::Formatter) -> fmt::Result {
+        write!(f, "P")
+    }
+}
+fn main() {
+    println!("{}", P);
+}
+```
+
+*Java* is the same: methods declared in an interface are implicitly
+public, and an implementation of `toString()` can't narrow that.
