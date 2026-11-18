@@ -680,3 +680,46 @@ fn main() {
 
 *Java* is the same: methods declared in an interface are implicitly
 public, and an implementation of `toString()` can't narrow that.
+
+### 28. A tuple variant is a constructor function: wrap errors with `map_err(MyError::Variant)`
+
+`AppError::Parse(e)` builds an `AppError` with `e` moved inside, like
+`new ParseFailed(e)` in Java. In a pattern the same spelling unpacks it.
+Because the variant name *is* a function (`fn(ParseIntError) -> AppError`),
+you can pass it without calling it, which is how one error enum composes
+several error types: one variant per way to fail, each wrapping the
+original error.
+
+```rust ok
+use std::num::ParseIntError;
+
+#[derive(Debug)]
+enum AppError {
+    Parse(ParseIntError),
+    Negative(i64),
+}
+
+fn parse_pos(s: &str) -> Result<i64, AppError> {
+    let n: i64 = s.parse().map_err(AppError::Parse)?; // variant as a function
+    if n < 0 {
+        return Err(AppError::Negative(n)); // variant as a constructor call
+    }
+    Ok(n)
+}
+
+fn main() {
+    for s in ["42", "-7", "x"] {
+        match parse_pos(s) {
+            Ok(n) => println!("ok {n}"),
+            Err(AppError::Parse(e)) => println!("not a number: {e}"),
+            Err(AppError::Negative(n)) => println!("negative: {n}"),
+        }
+    }
+}
+```
+
+`Some`, `Ok` and `Err` are the same thing: ordinary variants whose names
+are in the prelude. *Java* would use an exception subclass per failure;
+Rust uses one enum, and `match` replaces `catch` blocks. `Box<dyn Error>`
+is the catch-all alternative, fine in `main` but the caller can no longer
+match on which error it was.

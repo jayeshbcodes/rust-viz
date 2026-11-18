@@ -1880,7 +1880,10 @@ impl Interpreter {
                 if let Some(def) = self.enums.get(ty) {
                     return match def.variants.iter().find(|(v, ..)| v == c) {
                         Some((_, Shape::Unit, _)) => Ok(Value::Enum { ty: ty.clone(), variant: c.clone(), fields: vec![], copy: def.derives.copy }),
-                        Some(_) => Err(self.unsupported("using a tuple/struct enum variant as a function value")),
+                        // A tuple variant is its own constructor function:
+                        // `map_err(AppError::Parse)`.
+                        Some((_, Shape::Tuple, _)) => Ok(Value::FnItem(full)),
+                        Some(_) => compile_err(format!("expected value, found struct variant `{full}` (E0533)")),
                         None => compile_err(format!("no variant `{c}` in enum `{ty}` (E0599)")),
                     };
                 }
