@@ -723,3 +723,44 @@ are in the prelude. *Java* would use an exception subclass per failure;
 Rust uses one enum, and `match` replaces `catch` blocks. `Box<dyn Error>`
 is the catch-all alternative, fine in `main` but the caller can no longer
 match on which error it was.
+
+### 29. A view's method borrows `&self` briefly and returns the owner's `'a`
+
+A view type like `MyStr<'a> { bytes: &'a [u8] }` involves two references
+(two arrows): `&self` points from the caller to the *view*, and `'a`
+points from the view to the *owner's bytes*. A lifetime always belongs to
+one `&`, never to the data. A piece cut from the view (`slice`,
+`split_once`, an iterator's `next`) is a new arrow straight to the bytes,
+so its type should name the far arrow, `'a`, and leave `&self` short.
+
+```rust ok
+struct View<'a> {
+    bytes: &'a [u8],
+}
+
+impl<'a> View<'a> {
+    // Short borrow of the view in, the owner's 'a out.
+    fn split_once(&self, b: u8) -> Option<(View<'a>, View<'a>)> {
+        let i = self.bytes.iter().position(|c| *c == b)?;
+        Some((View { bytes: &self.bytes[..i] }, View { bytes: &self.bytes[i + 1..] }))
+    }
+}
+
+fn main() {
+    let owner = String::from("key=value");
+    let (k, v) = View { bytes: owner.as_bytes() }.split_once(b'=').unwrap(); // the view is a temporary
+    println!("{} {}", k.bytes.len(), v.bytes.len());
+}
+```
+
+Two ways to get it wrong, both rejected by rustc:
+
+- `-> View<'_>` (or a bare `View`): elision ties the pieces to the `&self`
+  arrow, so they die with the view (E0597 when the view is in an inner
+  block, even though the bytes are still alive).
+- `(&'a self, ..)`: demands the *view* live as long as the owner, so a
+  temporary view like the one above fails (E0716).
+
+std's `str::split_once` and `Chars::next` follow this rule. *Java* has one
+kind of arrow (a GC reference) and never names it; Rust names each one so
+it can check that none outlives its target.

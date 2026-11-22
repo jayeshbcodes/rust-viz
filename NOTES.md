@@ -141,6 +141,15 @@ Reference doesn't specify.
   target type from the turbofish or a `let x: T` annotation (else E0284),
   uses std's own parser, and returns std's error values
   (`ParseIntError { kind: .. }` etc.) with their exact Display messages.
+- Lifetimes are checked by following real pointers, not signatures
+  (found 2026-11-21). A view method declared `-> MyStr<'_>` whose result
+  actually points at the owner's bytes is accepted, where rustc says
+  E0597 once the view dies; `(&'a self, ..)` on a temporary view is
+  accepted where rustc says E0716. Golden rule 29 has only the `ok` case
+  for this reason.
+- Byte-string literals (`b"..."`) are unsupported, and `&[4, 5]` isn't
+  promoted to `'static` (assigning it to an outer variable from an inner
+  block is reported as dangling; rustc accepts it). Found 2026-11-21.
 - `format!`'s initial capacity isn't modeled exactly (we allocate `len`;
   real `format!` uses an estimate) — don't trust its `.capacity()`.
 - No per-binding type tracking: reassigning a variable to a value of a
