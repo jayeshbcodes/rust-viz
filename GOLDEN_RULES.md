@@ -764,3 +764,60 @@ Two ways to get it wrong, both rejected by rustc:
 std's `str::split_once` and `Chars::next` follow this rule. *Java* has one
 kind of arrow (a GC reference) and never names it; Rust names each one so
 it can check that none outlives its target.
+
+### 30. You choose `move`; the body decides `Fn`/`FnMut`/`FnOnce`; the bound lives in the signature that takes the closure
+
+A closure is an anonymous struct: its fields are the captures, its body is
+a method. Two separate moments:
+
+- **Creation:** without `move` each variable gets the weakest capture that
+  works (`&` to read, `&mut` to change, by value only if the body gives it
+  away); `move` makes every capture by value. This happens once.
+- **Each call:** the body only reads its fields → `Fn`; changes them →
+  `FnMut` (the binding needs `let mut`); moves one out (`let x = name;`,
+  returning it, `drop(name)`) → `FnOnce`, callable once.
+
+You never write the trait on the closure. It appears only where a function
+takes one (`F: FnMut()`), and a closure that doesn't fit is rejected there.
+Use `move` when the closure outlives the variables it uses: threads,
+returned closures, lazy iterators, stored callbacks.
+
+```rust ok
+fn call_twice<F: FnMut()>(mut f: F) {
+    f();
+    f();
+}
+
+fn main() {
+    let name = String::from("héllo");
+    let show = move || println!("{name}"); // move: captured once, at creation
+    show();
+    show(); // Fn: the body only reads its own copy
+
+    let mut count = 0;
+    call_twice(|| count += 1); // no move: borrows &mut count; FnMut
+    println!("{count}");
+}
+```
+
+```rust E0507
+fn call_twice<F: FnMut()>(mut f: F) {
+    f();
+    f();
+}
+
+fn main() {
+    let name = String::from("héllo");
+    call_twice(move || {
+        let x = name; // moves the capture out: FnOnce
+        println!("{x}");
+    });
+}
+```
+
+Stored in a variable first, the same closure is E0525 instead ("expected a
+closure that implements `FnMut`"). Fix it in the body: borrow (`&name`) or
+clone instead of moving the capture out. *Java* lambdas capture only
+effectively-final variables, by copying the value or reference; Rust can
+borrow, mutably borrow, or take ownership, and the borrow checker makes
+each one safe.

@@ -13,7 +13,7 @@ use crate::memory::{
     debug_value, display_value, owned_heap_ids, resolve, resolve_mut, Heap, HeapObject, MemoryError, OwnershipState,
     Resolved, Stack,
 };
-use crate::value::{HeapId, Place, Proj, RefKind, Value};
+use crate::value::{ClosureKind, HeapId, Place, Proj, RefKind, Value};
 
 /// Guards against runaway programs — every step snapshots the whole
 /// stack/heap, so an infinite loop would otherwise eat all memory.
@@ -255,6 +255,10 @@ pub struct Interpreter {
     /// Hidden bindings holding temporaries, dropped at the end of the
     /// statement that created them (unless borrowed — lifetime extension).
     temps: Vec<(usize, usize)>,
+    /// For the call being made: which arguments are written inline as
+    /// closures (`f(|| ..)`). rustc reports a closure that moves a capture
+    /// out differently there (E0507) than for one stored first (E0525).
+    inline_closure_args: Vec<bool>,
     /// One output buffer per user `fmt` call in progress (they nest: a
     /// `Display` impl can `{}`-format another `Display` type).
     fmt_bufs: Vec<String>,
@@ -311,6 +315,7 @@ impl Interpreter {
             next_inv: 1,
             self_tys: vec![None],
             temps: Vec::new(),
+            inline_closure_args: Vec::new(),
             fmt_bufs: Vec::new(),
             keep_refs: false,
             closures: Vec::new(),
@@ -2725,7 +2730,10 @@ impl Interpreter {
         for a in &call.args {
             args.push(self.eval_arg(a)?);
         }
-        self.call_path(segs, args, line)
+        self.inline_closure_args = call.args.iter().map(|a| matches!(a, Expr::Closure(_))).collect();
+        let r = self.call_path(segs, args, line);
+        self.inline_closure_args.clear();
+        r
     }
 
     /// Calls a function by path — user-defined, a supported std function,
@@ -2933,6 +2941,18 @@ impl Interpreter {
         let typed: Vec<&syn::PatType> = def.sig.inputs.iter().filter_map(|a| if let FnArg::Typed(t) = a { Some(t) } else { None }).collect();
         if typed.len() != args.len() {
             return compile_err(format!("`{}` takes {} argument(s) but {} were supplied (E0061)", def.name, typed.len(), args.len()));
+        }
+        let inline = std::mem::take(&mut self.inline_closure_args);
+        for (i, (pt, v)) in typed.iter().zip(&args).enumerate() {
+            if let Value::Closure { kind: ClosureKind::FnOnce, .. } = v
+                && let Some(need) = closure_bound(&def.sig, &pt.ty)
+            {
+                return compile_err(if inline.get(i) == Some(&true) {
+                    format!("cannot move out of a captured variable in an `{need}` closure: `{}` requires `{need}`, but the body moves a capture out (E0507)", def.name)
+                } else {
+                    format!("expected a closure that implements `{need}`, but this closure only implements `FnOnce`: it moves a captured value out (E0525)")
+                });
+            }
         }
         let inv = self.next_inv;
         self.next_inv += 1;
@@ -4538,6 +4558,50 @@ fn cast(v: Value, ty: &str) -> R<Value> {
         (Value::Int(i), "char") if (0..=255).contains(&i) => Value::Char(i as u8 as char),
         (v, t) => return compile_err(format!("non-primitive cast: `{}` as `{t}` (E0605)", v.type_name())),
     })
+}
+
+/// The `Fn`/`FnMut` bound a parameter's type puts on a closure argument:
+/// `f: impl FnMut()`, or `f: F` with `F: Fn()` in the generics or `where`
+/// clause. `None` when the parameter accepts an `FnOnce`.
+fn closure_bound(sig: &syn::Signature, ty: &syn::Type) -> Option<&'static str> {
+    fn strongest<'a>(bounds: impl Iterator<Item = &'a syn::TypeParamBound>) -> Option<&'static str> {
+        let mut need = None;
+        for b in bounds {
+            if let syn::TypeParamBound::Trait(t) = b {
+                match t.path.segments.last().map(|s| s.ident.to_string()).as_deref() {
+                    Some("Fn") => return Some("Fn"),
+                    Some("FnMut") => need = Some("FnMut"),
+                    _ => {}
+                }
+            }
+        }
+        need
+    }
+    match ty {
+        syn::Type::ImplTrait(it) => strongest(it.bounds.iter()),
+        syn::Type::Path(p) if p.qself.is_none() && p.path.segments.len() == 1 => {
+            let name = &p.path.segments[0].ident;
+            let mut bounds: Vec<&syn::TypeParamBound> = Vec::new();
+            for gp in &sig.generics.params {
+                if let syn::GenericParam::Type(tp) = gp
+                    && tp.ident == *name
+                {
+                    bounds.extend(tp.bounds.iter());
+                }
+            }
+            if let Some(w) = &sig.generics.where_clause {
+                for pred in &w.predicates {
+                    if let syn::WherePredicate::Type(pt) = pred
+                        && *name == pt.bounded_ty.to_token_stream().to_string()
+                    {
+                        bounds.extend(pt.bounds.iter());
+                    }
+                }
+            }
+            strongest(bounds.into_iter())
+        }
+        _ => None,
+    }
 }
 
 fn derives_of(attrs: &[syn::Attribute]) -> Derives {
