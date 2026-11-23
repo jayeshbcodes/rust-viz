@@ -638,7 +638,24 @@ impl fmt::Debug for DebugView<'_> {
             Value::Unit => f.write_str("()"),
             Value::Formatter(_) => f.write_str("Formatter"),
             Value::Hasher(_) => f.write_str("DefaultHasher"),
-            Value::Closure { .. } => f.write_str("<closure>"),
+            // A closure is a struct of its captures: `closure { min: &min }`.
+            Value::Closure { captures, modes, .. } => {
+                if captures.is_empty() {
+                    return f.write_str("closure {}");
+                }
+                f.write_str("closure { ")?;
+                for (i, ((n, v), m)) in captures.iter().zip(modes).enumerate() {
+                    if i > 0 {
+                        f.write_str(", ")?;
+                    }
+                    match m {
+                        crate::value::Capture::ByRef => write!(f, "{n}: &{n}")?,
+                        crate::value::Capture::ByMut => write!(f, "{n}: &mut {n}")?,
+                        crate::value::Capture::ByValue => write!(f, "{n}: {:?}", self.with(v))?,
+                    }
+                }
+                f.write_str(" }")
+            }
             Value::FnItem(n) => f.write_str(n),
             Value::Iter(n) => match &**n {
                 crate::value::IterNode::Range { front, back } => write!(f, "{front}..{back}"),
