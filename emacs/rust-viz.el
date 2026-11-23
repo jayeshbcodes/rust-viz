@@ -21,8 +21,9 @@
 ;;   `rust-viz-run'    annotate every executed line with its final effect,
 ;;                     and show the stack/heap for the line at point in a
 ;;                     side window (it follows the cursor).
-;;   `rust-viz-step'   step through execution: n/p next/previous, g/G
-;;                     first/last, q quit.  The current line is
+;;   `rust-viz-step'   step through execution: n/p next/previous (into
+;;                     calls), o/O step over calls forward/back, u step
+;;                     out of the current function, g/G first/last, q quit.  The current line is
 ;;                     highlighted, annotations replay up to that step, and
 ;;                     a side window shows the full stack, heap and events.
 ;;   `rust-viz-clear'  remove annotations.
@@ -283,6 +284,9 @@ visible, so closing it isn't undone by moving the cursor)."
     (define-key map (kbd "SPC") #'rust-viz-next)
     (define-key map (kbd "p") #'rust-viz-previous)
     (define-key map (kbd "DEL") #'rust-viz-previous)
+    (define-key map (kbd "o") #'rust-viz-step-over)
+    (define-key map (kbd "O") #'rust-viz-step-over-back)
+    (define-key map (kbd "u") #'rust-viz-step-out)
     (define-key map (kbd "g") #'rust-viz-first)
     (define-key map (kbd "G") #'rust-viz-last)
     (define-key map (kbd "q") #'rust-viz-quit)
@@ -329,7 +333,7 @@ visible, so closing it isn't undone by moving the cursor)."
       (move-overlay rust-viz--line-overlay (line-beginning-position) (1+ (line-end-position))))
     (rust-viz--fill-detail (rust-viz--detail-text step i n))
     (rust-viz--display-detail)
-    (message "rust-viz: step %d/%d%s   n/p step · g/G first/last · q quit" (1+ i) n
+    (message "rust-viz: step %d/%d%s   n/p step · o/O over · u out · g/G first/last · q quit" (1+ i) n
              (if (= line 0) " (end of program)" ""))))
 
 ;; `output_len' counts UTF-8 bytes (as Rust's `String::len' does), while
@@ -382,6 +386,43 @@ size you've dragged it to sticks while stepping."
   "Go to the previous step."
   (interactive)
   (rust-viz--goto (1- rust-viz--index)))
+
+(defun rust-viz--depth (i) (alist-get 'depth (rust-viz--step i)))
+
+(defun rust-viz--over-depth (i)
+  "Depth step I counts at for stepping over: a call's first step is shown
+on the caller's line but recorded at the callee's depth, so it belongs to
+the caller."
+  (if (> i 0) (min (rust-viz--depth i) (rust-viz--depth (1- i))) (rust-viz--depth i)))
+
+(defun rust-viz--find-step (from dir pred)
+  "First step index after FROM, moving by DIR (1 or -1), whose depth
+satisfies PRED; or the last/first step if none does."
+  (let ((n (length (rust-viz--steps)))
+        (i (+ from dir)))
+    (while (and (>= i 0) (< i n) (not (funcall pred (rust-viz--depth i))))
+      (setq i (+ i dir)))
+    (max 0 (min i (1- n)))))
+
+(defun rust-viz-step-over ()
+  "Go to the next step in this function or its caller: a call runs as
+one step, showing the state after it returns."
+  (interactive)
+  (let ((d (rust-viz--over-depth rust-viz--index)))
+    (rust-viz--goto (rust-viz--find-step rust-viz--index 1 (lambda (x) (<= x d))))))
+
+(defun rust-viz-step-over-back ()
+  "Go to the previous step in this function or its caller, skipping
+over the inside of calls."
+  (interactive)
+  (let ((d (rust-viz--over-depth rust-viz--index)))
+    (rust-viz--goto (rust-viz--find-step rust-viz--index -1 (lambda (x) (<= x d))))))
+
+(defun rust-viz-step-out ()
+  "Go to the first step after the current function returns."
+  (interactive)
+  (let ((d (rust-viz--depth rust-viz--index)))
+    (rust-viz--goto (rust-viz--find-step rust-viz--index 1 (lambda (x) (< x d))))))
 
 (defun rust-viz-first ()
   "Go to the first step."

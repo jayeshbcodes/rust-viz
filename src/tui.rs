@@ -1,6 +1,8 @@
 use std::collections::HashSet;
 use std::io;
 
+use crate::json::depth;
+
 use crossterm::event::{self, Event as CEvent, KeyCode, KeyEventKind, KeyModifiers};
 use ratatui::layout::{Constraint, Direction, Layout, Rect};
 use ratatui::style::{Color, Modifier, Style};
@@ -37,6 +39,9 @@ pub fn run(steps: &[Step], source: &str, path: &str, error: Option<String>) -> i
                 KeyCode::Char('p') | KeyCode::Left | KeyCode::Up => index = index.saturating_sub(1),
                 KeyCode::PageDown => index = (index + 10).min(steps.len() - 1),
                 KeyCode::PageUp => index = index.saturating_sub(10),
+                KeyCode::Char('o') => index = find_step(steps, index, true, over_depth(steps, index), |d, cur| d <= cur),
+                KeyCode::Char('O') => index = find_step(steps, index, false, over_depth(steps, index), |d, cur| d <= cur),
+                KeyCode::Char('u') => index = find_step(steps, index, true, depth(&steps[index]), |d, cur| d < cur),
                 KeyCode::Char('g') | KeyCode::Home => index = 0,
                 KeyCode::Char('G') | KeyCode::End => index = steps.len() - 1,
                 _ => {}
@@ -139,7 +144,7 @@ fn draw_stepper(frame: &mut Frame, steps: &[Step], index: usize, source: &[&str]
     draw_output(frame, bottom[1], step);
 
     frame.render_widget(
-        Paragraph::new("n/→/space next   p/← back   PgUp/PgDn ±10   g/G first/last   q quit").style(Style::default().fg(Color::DarkGray)),
+        Paragraph::new("n/→/space next   p/← back   o/O step over   u step out   PgUp/PgDn ±10   g/G first/last   q quit").style(Style::default().fg(Color::DarkGray)),
         rows[2],
     );
 }
@@ -369,6 +374,25 @@ fn draw_output(frame: &mut Frame, area: Rect, step: &Step) {
         step.output.lines().map(|l| Line::from(l.to_string())).collect()
     };
     frame.render_widget(scrolled(lines, None, area, "program output".into()), area);
+}
+
+/// The depth step `i` counts at for stepping over: a call's first step is
+/// shown on the caller's line but recorded at the callee's depth, so it
+/// belongs to the caller.
+fn over_depth(steps: &[Step], i: usize) -> usize {
+    let d = depth(&steps[i]);
+    if i > 0 { d.min(depth(&steps[i - 1])) } else { d }
+}
+
+/// Step over (`d <= cur`) or out (`d < cur`): the nearest step after (or
+/// before) `from` whose call depth passes `ok`, else the last (first) step.
+fn find_step(steps: &[Step], from: usize, forward: bool, cur: usize, ok: impl Fn(usize, usize) -> bool) -> usize {
+    let found = if forward {
+        (from + 1..steps.len()).find(|&i| ok(depth(&steps[i]), cur))
+    } else {
+        (0..from).rev().find(|&i| ok(depth(&steps[i]), cur))
+    };
+    found.unwrap_or(if forward { steps.len() - 1 } else { 0 })
 }
 
 #[cfg(test)]

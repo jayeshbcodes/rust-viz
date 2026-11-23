@@ -54,7 +54,7 @@ pub fn render(steps: &[Step], output: &str, error: Option<&str>) -> String {
 /// Function frames on the stack. A function's closing-`}` step is
 /// recorded just after its frame is popped, but it belongs to the callee,
 /// so it counts at the callee's depth.
-fn depth(step: &Step) -> usize {
+pub fn depth(step: &Step) -> usize {
     let exits = step.events.iter().filter(|e| matches!(e, Event::FrameExit { .. })).count();
     step.stack.frames.iter().filter(|f| !f.is_scope).count() + exits
 }

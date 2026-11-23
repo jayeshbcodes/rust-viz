@@ -182,3 +182,29 @@
       (delete-file file))))
 
 ;;; rust-viz-test.el ends here
+
+(ert-deftest rust-viz-step-over-and-out ()
+  (with-temp-buffer
+    (insert "fn add(a: i32, b: i32) -> i32 {\n    let s = a + b;\n    s\n}\nfn main() {\n    let x = 1;\n    let y = add(x, 2);\n    println!(\"{y}\");\n}\n")
+    (rust-viz-step)
+    (unwind-protect
+        (progn
+          (rust-viz-next)                      ; line 6: let x = 1;
+          (should (= (line-number-at-pos) 6))
+          (rust-viz-step-over)                 ; the whole add() call is one step
+          (should (= (line-number-at-pos) 7))
+          (should (= (rust-viz--depth rust-viz--index) 1))
+          (rust-viz-step-over-back)            ; back over it, not into it
+          (should (= (line-number-at-pos) 6))
+          (rust-viz-next)                      ; on the call: "→ add()"
+          (rust-viz-step-over)                 ; still steps over, not in
+          (should (= (line-number-at-pos) 7))
+          (should (= (rust-viz--depth rust-viz--index) 1))
+          (rust-viz-step-over-back)
+          (rust-viz-next)
+          (rust-viz-next)                      ; inside add: let s = a + b;
+          (should (= (line-number-at-pos) 2))
+          (rust-viz-step-out)                  ; back in main, after the call
+          (should (= (line-number-at-pos) 7))
+          (should (= (rust-viz--depth rust-viz--index) 1)))
+      (rust-viz-quit))))

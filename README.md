@@ -29,7 +29,7 @@ reveals: that `Vec::new()` hasn't allocated yet, that `s1 + &s2` reuses
 ## Usage
 
 ```sh
-cargo run -- samples/borrowing.rs          # step through a program (n / p / q)
+cargo run -- samples/borrowing.rs          # step through a program (n / p, o step over, u step out, q)
 cargo run -- --trace samples/borrowing.rs  # the same trace as plain text
 cargo run                                  # live REPL: type Rust, watch memory update
 cargo run -- --json samples/borrowing.rs   # machine-readable trace (for editors)
