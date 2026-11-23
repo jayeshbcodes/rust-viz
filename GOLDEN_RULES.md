@@ -926,3 +926,48 @@ class, callable wherever the object goes. In Rust the impl hangs off the
 trait, so a module that hasn't imported it can't see those methods. That's
 also why you may add a trait to a type you didn't write
 (`impl MyIterator for Vec<T>`) without changing it for anyone else.
+
+### 32. `map` and `filter` build structs; nothing runs until something calls `next`
+
+`iter.filter(p)` doesn't look at a single item. It moves `iter` and the
+closure into a new struct, `Filter { iter, pred }`, and returns it: a new
+iterator wrapping the old one. Its `next` pulls from the inner iterator,
+skipping items until `pred` says yes (one outer `next` may take several
+inner ones; rejected items are skipped, never turned into `None`). `map`
+is the same, one item in, one out. A chain nests them like Russian dolls,
+`Map<Filter<Iter, P>, F>`, and only a consumer (`count`, `collect`, a `for`
+loop) drives it, calling `next` on the outer doll.
+
+```rust ok
+fn main() {
+    let words = vec!["héllo", "big", "world"];
+    let mut checks = 0;
+    let long = words.iter().filter(|w| {
+        checks += 1;
+        w.len() > 3
+    }); // builds a Filter struct: nothing checked yet
+    let n = long.map(|w| w.len()).count(); // count pulls every item through
+    println!("{n} kept, {checks} checks");
+}
+```
+
+The closure inside `long` holds `&mut checks` for as long as `long` exists,
+so `checks` can't even be read until the iterator is used up:
+
+```rust E0502
+fn main() {
+    let words = vec!["héllo", "big", "world"];
+    let mut checks = 0;
+    let long = words.iter().filter(|w| {
+        checks += 1;
+        w.len() > 3
+    });
+    println!("{checks} checks so far"); // the closure inside `long` still holds &mut checks
+    println!("{}", long.count());
+}
+```
+
+*Java* streams work the same way (a pipeline-stage object per `map`, run
+only by a terminal op), but every stage is a heap object reached through a
+virtual call. Rust's whole chain is one concrete type known at compile time
+(rule 26), so the optimizer flattens it into a single loop.

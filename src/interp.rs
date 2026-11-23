@@ -2443,7 +2443,18 @@ impl Interpreter {
         match name.as_str() {
             "println" | "print" | "format" | "panic" | "eprintln" | "eprint" => {
                 let args: Vec<Expr> = parse_args()?.into_iter().collect();
-                let text = if args.is_empty() { String::new() } else { self.format_macro_args(&args)? };
+                // Format arguments are taken by reference, so reading one
+                // that's mutably borrowed is a borrow conflict (E0502).
+                let text = if args.is_empty() {
+                    String::new()
+                } else {
+                    self.format_macro_args(&args).map_err(|e| match e {
+                        Flow::Err(InterpError::Memory(MemoryError::UseWhileMutablyBorrowed(n))) => {
+                            Flow::Err(InterpError::CompileError(format!("cannot borrow `{n}` as immutable because it is also borrowed as mutable (E0502)")))
+                        }
+                        e => e,
+                    })?
+                };
                 match name.as_str() {
                     "println" => {
                         self.output.push_str(&text);

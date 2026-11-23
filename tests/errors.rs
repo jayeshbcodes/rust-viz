@@ -150,7 +150,7 @@ fn fnmut_closure_needs_mut_binding() {
 fn using_a_variable_while_a_closure_still_holds_its_mut_borrow() {
     // Rust Book ch. 13.1: printing between defining and calling the closure.
     let e = err_of("fn main() { let mut list = vec![1]; let mut f = || list.push(7); println!(\"{list:?}\"); f(); }");
-    assert!(e.contains("mutably borrowed"), "{e}");
+    assert!(e.contains("E0502"), "{e}");
 }
 
 #[test]
