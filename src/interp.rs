@@ -115,6 +115,9 @@ struct FnDef {
     /// `line_offset` when the definition was fed (REPL), so lines inside
     /// the body map back to what the user typed.
     line_base: usize,
+    /// The enclosing `impl`'s generics (`<I: MyIterator, F>`): a trait
+    /// named in a bound is callable in the body without a `use`.
+    impl_bounds: String,
 }
 
 #[derive(Clone, Copy, PartialEq)]
@@ -218,6 +221,11 @@ pub struct Interpreter {
     consts: HashMap<String, Value>,
     trait_defaults: HashMap<String, HashMap<String, Rc<FnDef>>>,
     impls: HashMap<String, Vec<String>>,
+    /// User-defined trait → the module it's defined in.
+    traits: HashMap<String, Vec<String>>,
+    /// `Tokens::next` → `MyIterator`, for methods from a trait impl:
+    /// callable only where that trait is in scope.
+    trait_methods: HashMap<String, String>,
     /// `use List::{Cons, Nil};` → `Cons` ↦ `List::Cons`. Keyed by the
     /// alias's full path (`ops::Cons` inside `mod ops`), and the target is
     /// kept as written, with the module it was written in.
@@ -252,6 +260,8 @@ pub struct Interpreter {
     frame_inv: Vec<usize>,
     next_inv: usize,
     self_tys: Vec<Option<String>>,
+    /// The functions running now, innermost last.
+    cur_fns: Vec<Rc<FnDef>>,
     /// Hidden bindings holding temporaries, dropped at the end of the
     /// statement that created them (unless borrowed — lifetime extension).
     temps: Vec<(usize, usize)>,
@@ -301,6 +311,8 @@ impl Interpreter {
             consts: HashMap::new(),
             trait_defaults: HashMap::new(),
             impls: HashMap::new(),
+            traits: HashMap::new(),
+            trait_methods: HashMap::new(),
             aliases: HashMap::new(),
             glob_enums: Vec::new(),
             glob_uses: Vec::new(),
@@ -314,6 +326,7 @@ impl Interpreter {
             frame_inv: Vec::new(),
             next_inv: 1,
             self_tys: vec![None],
+            cur_fns: Vec::new(),
             temps: Vec::new(),
             inline_closure_args: Vec::new(),
             fmt_bufs: Vec::new(),
@@ -498,7 +511,7 @@ impl Interpreter {
         match item {
             Item::Fn(f) => {
                 let name = self.qualify(&f.sig.ident.to_string(), &f.vis);
-                let def = FnDef { name: name.clone(), sig: f.sig.clone(), block: (*f.block).clone(), self_ty: None, module: self.cur_mod().to_vec(), line_base: self.line_offset };
+                let def = FnDef { name: name.clone(), sig: f.sig.clone(), block: (*f.block).clone(), self_ty: None, module: self.cur_mod().to_vec(), line_base: self.line_offset, impl_bounds: String::new() };
                 self.fns.insert(name, Rc::new(def));
             }
             Item::Struct(s) => {
@@ -540,11 +553,14 @@ impl Interpreter {
                             return compile_err(format!("visibility qualifiers are not permitted on `{}`: trait items always share the visibility of their trait (E0449)", f.sig.ident));
                         }
                         let name = format!("{ty}::{}", f.sig.ident);
-                        let def = Rc::new(FnDef { name: name.clone(), sig: f.sig.clone(), block: f.block.clone(), self_ty: Some(ty.clone()), module: self.cur_mod().to_vec(), line_base: self.line_offset });
+                        let def = Rc::new(FnDef { name: name.clone(), sig: f.sig.clone(), block: f.block.clone(), self_ty: Some(ty.clone()), module: self.cur_mod().to_vec(), line_base: self.line_offset, impl_bounds: imp.generics.to_token_stream().to_string() });
                         // `impl Display` and `impl Debug` both define `fmt`,
                         // so trait methods are also keyed by trait.
                         if let Some(tr) = &tr {
                             self.fns.insert(format!("{ty}::{tr}::{}", f.sig.ident), def.clone());
+                            self.trait_methods.insert(name.clone(), tr.clone());
+                        } else {
+                            self.trait_methods.remove(&name);
                         }
                         self.fns.insert(name, def);
                     }
@@ -552,12 +568,13 @@ impl Interpreter {
             }
             Item::Trait(t) => {
                 let module = self.cur_mod().to_vec();
+                self.traits.insert(t.ident.to_string(), module.clone());
                 let defaults = self.trait_defaults.entry(t.ident.to_string()).or_default();
                 for it in &t.items {
                     if let syn::TraitItem::Fn(f) = it
                         && let Some(block) = &f.default
                     {
-                        let def = FnDef { name: f.sig.ident.to_string(), sig: f.sig.clone(), block: block.clone(), self_ty: None, module: module.clone(), line_base: self.line_offset };
+                        let def = FnDef { name: f.sig.ident.to_string(), sig: f.sig.clone(), block: block.clone(), self_ty: None, module: module.clone(), line_base: self.line_offset, impl_bounds: String::new() };
                         defaults.insert(f.sig.ident.to_string(), Rc::new(def));
                     }
                 }
@@ -623,16 +640,33 @@ impl Interpreter {
         }
     }
 
-    fn find_method(&self, ty: &str, method: &str) -> Option<(Rc<FnDef>, String)> {
-        if let Some(def) = self.fns.get(&format!("{ty}::{method}")) {
-            return Some((def.clone(), ty.to_string()));
+    /// The method, and the trait it comes from (`None` if inherent).
+    fn find_method(&self, ty: &str, method: &str) -> Option<(Rc<FnDef>, Option<String>)> {
+        let key = format!("{ty}::{method}");
+        if let Some(def) = self.fns.get(&key) {
+            return Some((def.clone(), self.trait_methods.get(&key).cloned()));
         }
         for tr in self.impls.get(ty)? {
             if let Some(def) = self.trait_defaults.get(tr).and_then(|d| d.get(method)) {
-                return Some((def.clone(), ty.to_string()));
+                return Some((def.clone(), Some(tr.clone())));
             }
         }
         None
+    }
+
+    /// Whether a user-defined trait's methods are callable here: it's
+    /// defined in this module, imported by `use` (or a glob), or named in
+    /// a bound of the running function or its `impl`. Std traits (not in
+    /// `self.traits`) always count as in scope.
+    fn trait_in_scope(&self, tr: &str) -> bool {
+        let Some(home) = self.traits.get(tr) else { return true };
+        let cur = self.cur_mod();
+        let full = [&home[..], &[tr.to_string()]].concat();
+        let names = |s: &str| s.split(|c: char| !c.is_alphanumeric() && c != '_').any(|w| w == tr);
+        home.as_slice() == cur
+            || self.aliases.values().any(|(at, target)| at.as_slice() == cur && self.absolute(target, at, false) == full)
+            || self.glob_uses.iter().any(|(at, prefix)| at.as_slice() == cur && self.absolute(prefix, at, false) == *home)
+            || self.cur_fns.last().is_some_and(|f| names(&f.impl_bounds) || names(&f.sig.to_token_stream().to_string()))
     }
 
     fn current_self_ty(&self) -> Option<String> {
@@ -2964,6 +2998,7 @@ impl Interpreter {
         self.line_offset = def.line_base;
         self.self_tys.push(def.self_ty.clone());
         self.mod_stack.push(def.module.clone());
+        self.cur_fns.push(def.clone());
 
         let result = (|| -> R<Value> {
             if let Some(sv) = self_arg {
@@ -3007,6 +3042,7 @@ impl Interpreter {
         self.pop_frame(close)?;
         self.self_tys.pop();
         self.mod_stack.pop();
+        self.cur_fns.pop();
         self.line_offset = saved_offset;
         self.cur_line = call_line;
         Ok(result)
@@ -3042,8 +3078,14 @@ impl Interpreter {
         let recv = self.auto_deref(recv)?;
         let got = self.got(&recv.place)?;
         if let Got::Val(Value::Struct { ty, .. } | Value::Enum { ty, .. }) = &got
-            && let Some((def, _)) = self.find_method(ty, &method)
+            && let Some((def, tr)) = self.find_method(ty, &method)
         {
+            if let Some(tr) = tr
+                && !self.trait_in_scope(&tr)
+            {
+                let path = [&self.traits[&tr][..], std::slice::from_ref(&tr)].concat().join("::");
+                return compile_err(format!("no method named `{method}` found for `{ty}` in the current scope: it comes from trait `{tr}`, which isn't in scope here — add `use crate::{path};` (E0599)"));
+            }
             let mut args = Vec::new();
             for a in &m.args {
                 args.push(self.eval_arg(a)?);
@@ -3477,6 +3519,8 @@ impl Interpreter {
                     "is_uppercase" => Value::Bool(c.is_uppercase()),
                     "is_lowercase" => Value::Bool(c.is_lowercase()),
                     "is_ascii_digit" => Value::Bool(c.is_ascii_digit()),
+                    "is_ascii_whitespace" => Value::Bool(c.is_ascii_whitespace()),
+                    "is_ascii_alphabetic" => Value::Bool(c.is_ascii_alphabetic()),
                     "is_ascii_punctuation" => Value::Bool(c.is_ascii_punctuation()),
                     "is_ascii" => Value::Bool(c.is_ascii()),
                     "to_ascii_uppercase" => Value::Char(c.to_ascii_uppercase()),
@@ -3492,6 +3536,20 @@ impl Interpreter {
             // ── numbers
             (Got::Val(Value::Int(i)), _) => {
                 let i = *i;
+                // `u8`'s ASCII predicates (`b.is_ascii_whitespace()`).
+                if let Ok(b) = u8::try_from(i) {
+                    let v = match method {
+                        "is_ascii_whitespace" => Some(b.is_ascii_whitespace()),
+                        "is_ascii_digit" => Some(b.is_ascii_digit()),
+                        "is_ascii_alphabetic" => Some(b.is_ascii_alphabetic()),
+                        "is_ascii_punctuation" => Some(b.is_ascii_punctuation()),
+                        "is_ascii" => Some(b.is_ascii()),
+                        _ => None,
+                    };
+                    if let Some(v) = v {
+                        return Ok(Value::Bool(v));
+                    }
+                }
                 let a = || args.first().cloned().unwrap_or(Value::Unit);
                 Ok(Value::Int(match (method, self.deref_val(a())?) {
                     ("abs", _) => i.abs(),

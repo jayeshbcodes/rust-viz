@@ -643,6 +643,10 @@ becomes `Object`, and `x.toString()` is picked at runtime by a virtual
 call (runtime polymorphism). Rust has that too, opt-in, with `dyn Trait`
 (Rust Book ch. 17): one copy plus a vtable lookup.
 
+A trait's default method is generic too, over `Self`: `count` written once
+in `trait MyIterator` becomes `count::<Tokens>` when you call it on
+`Tokens`, with its `self.next()` a direct call to `Tokens::next`.
+
 ### 27. A trait impl's methods take the trait's visibility: no `pub` there
 
 In an inherent impl (`impl MyStr { ... }`) you choose `pub` or private per
@@ -821,3 +825,104 @@ clone instead of moving the capture out. *Java* lambdas capture only
 effectively-final variables, by copying the value or reference; Rust can
 borrow, mutably borrow, or take ownership, and the borrow checker makes
 each one safe.
+
+### 31. A trait's methods exist only where the trait is in scope: `use` it
+
+Implement one required method (`next`) and every default method (`count`)
+comes with it, written once on the trait in terms of `next`. That's the
+template method pattern, minus the base class. But calling any of them,
+even `next`, needs the trait itself in scope where the call is written:
+defined in that module, or imported with `use`. A bound on the function
+(`I: MyIterator`) counts too.
+
+```rust ok
+mod iter {
+    pub trait Countdown {
+        fn next(&mut self) -> Option<u32>;
+        fn count(mut self) -> usize
+        where
+            Self: Sized,
+        {
+            let mut n = 0;
+            while let Some(_) = self.next() {
+                n += 1;
+            }
+            n
+        }
+    }
+}
+
+mod timer {
+    use crate::iter::Countdown;
+    pub struct Timer {
+        pub left: u32,
+    }
+    impl Countdown for Timer {
+        fn next(&mut self) -> Option<u32> {
+            if self.left == 0 {
+                return None;
+            }
+            self.left -= 1;
+            Some(self.left)
+        }
+    }
+}
+
+use crate::iter::Countdown; // brings `count` into scope
+use crate::timer::Timer;
+
+fn main() {
+    let t = Timer { left: 3 };
+    println!("{}", t.count());
+}
+```
+
+```rust E0599
+mod iter {
+    pub trait Countdown {
+        fn next(&mut self) -> Option<u32>;
+        fn count(mut self) -> usize
+        where
+            Self: Sized,
+        {
+            let mut n = 0;
+            while let Some(_) = self.next() {
+                n += 1;
+            }
+            n
+        }
+    }
+}
+
+mod timer {
+    use crate::iter::Countdown;
+    pub struct Timer {
+        pub left: u32,
+    }
+    impl Countdown for Timer {
+        fn next(&mut self) -> Option<u32> {
+            if self.left == 0 {
+                return None;
+            }
+            self.left -= 1;
+            Some(self.left)
+        }
+    }
+}
+
+use crate::timer::Timer;
+
+fn main() {
+    let t = Timer { left: 3 };
+    println!("{}", t.count());
+}
+```
+
+rustc's first line here is "`Timer` is not an iterator": it guesses you
+meant std's `Iterator`, which also has a `count`. The `help:` line has the
+real fix: "trait `Countdown` which provides `count` is implemented but not
+in scope". *Java* has no such rule: `implements` puts the methods on the
+class, callable wherever the object goes. In Rust the impl hangs off the
+trait, so a module that hasn't imported it can't see those methods. That's
+also why you may add a trait to a type you didn't write
+(`impl MyIterator for Vec<T>`) without changing it for anyone else.
