@@ -3099,6 +3099,11 @@ impl Interpreter {
             };
             return self.call_fn(def, Some(self_val), args, line);
         }
+        if let Got::Val(Value::Struct { ty, .. }) = &got
+            && self.structs.get(ty).is_some_and(|d| d.fields.contains(&method))
+        {
+            return compile_err(format!("no method named `{method}` found for `{ty}`: `{method}` is a field — to call the closure stored in it, wrap the field access in parentheses: `(self.{method})(...)` (E0599)"));
+        }
         // Iterators, closures-taking methods (`Option::map`, `Vec::retain`…),
         // and iterator sources (`.iter()`, `.chars()`, `.as_bytes()`…).
         let turbofish = m.turbofish.as_ref().map(|t| t.to_token_stream().to_string());
